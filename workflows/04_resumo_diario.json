@@ -1,0 +1,18 @@
+{
+  "name": "04 - Resumo diario (backend local)",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    { "id": "1", "name": "Agendamento", "type": "n8n-nodes-base.scheduleTrigger", "typeVersion": 1.2, "position": [240, 300], "parameters": { "rule": { "interval": [ { "field": "cronExpression", "expression": "30 18 * * 1-5" } ] } } },
+    { "id": "2", "name": "Config", "type": "n8n-nodes-base.set", "typeVersion": 2, "position": [460, 300], "parameters": { "keepOnlySet": true, "values": { "string": [ { "name": "backendUrl", "value": "http://host.docker.internal:3000" }, { "name": "gestorTelefone", "value": "={{ $env.GESTOR_TELEFONE }}" } ] } } },
+    { "id": "3", "name": "Ler Cameras", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [680, 300], "parameters": { "method": "GET", "url": "={{ $node['Config'].json.backendUrl }}/api/cameras", "options": {} } },
+    { "id": "4", "name": "Montar resumo", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [900, 300], "parameters": { "language": "javascript", "jsCode": "const cameras = $input.all().map(i => i.json);\nconst cfg = $('Config').first().json;\nconst counts = { 'Pendente':0, 'Aguardando resposta':0, 'Verificando':0, 'Suporte':0, 'Aguardando validacao':0, 'Resolvido':0 };\nfor (const c of cameras) { const st = String(c.status || '').trim(); if (counts[st] !== undefined) counts[st]++; }\nconst today = new Date().toISOString().slice(0,10);\nconst resolvidasHoje = cameras.filter(c => String(c.data_resolucao || '').slice(0,10) === today).length;\nconst payload = { messaging_product: 'whatsapp', to: cfg.gestorTelefone, type: 'template', template: { name: 'resumo_diario', language: { code: 'pt_BR' }, components: [ { type: 'body', parameters: [ { type: 'text', text: String(counts['Pendente']) }, { type: 'text', text: String(counts['Aguardando resposta']) }, { type: 'text', text: String(counts['Verificando']) }, { type: 'text', text: String(counts['Suporte']) }, { type: 'text', text: String(resolvidasHoje) } ] } ] } };\nreturn [{ json: { gestor: cfg.gestorTelefone, counts: counts, resolvidasHoje: resolvidasHoje, payload: payload } }];" } },
+    { "id": "5", "name": "Enviar resumo", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [1120, 300], "parameters": { "method": "POST", "url": "https://graph.facebook.com/v20.0/{{ $env.META_WA_PHONE_NUMBER_ID }}/messages", "sendHeaders": true, "headerParameters": { "parameters": [ { "name": "Authorization", "value": "Bearer {{ $env.META_WA_ACCESS_TOKEN }}" }, { "name": "Content-Type", "value": "application/json" } ] }, "sendBody": true, "contentType": "raw", "rawContentType": "application/json", "body": "={{ JSON.stringify($json.payload) }}" } }
+  ],
+  "connections": {
+    "Agendamento": { "main": [ [ { "node": "Config", "type": "main", "index": 0 } ] ] },
+    "Config": { "main": [ [ { "node": "Ler Cameras", "type": "main", "index": 0 } ] ] },
+    "Ler Cameras": { "main": [ [ { "node": "Montar resumo", "type": "main", "index": 0 } ] ] },
+    "Montar resumo": { "main": [ [ { "node": "Enviar resumo", "type": "main", "index": 0 } ] ] }
+  }
+}

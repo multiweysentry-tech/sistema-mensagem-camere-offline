@@ -1,0 +1,16 @@
+{
+  "name": "00 - Tratamento de erros (Error Workflow)",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    { "id": "1", "name": "Erro capturado", "type": "n8n-nodes-base.errorTrigger", "typeVersion": 1, "position": [240, 300], "parameters": {} },
+    { "id": "1b", "name": "Config", "type": "n8n-nodes-base.set", "typeVersion": 2, "position": [350, 300], "parameters": { "keepOnlySet": true, "values": { "string": [ { "name": "gestorTelefone", "value": "={{ $env.GESTOR_TELEFONE }}" }, { "name": "phoneNumberId", "value": "={{ $env.META_WA_PHONE_NUMBER_ID }}" } ] } } },
+    { "id": "2", "name": "Montar alerta", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [460, 300], "parameters": { "language": "javascript", "jsCode": "const e = $('Erro capturado').first().json;\nconst cfg = $('Config').first().json;\nconst workflow = (e.workflow && e.workflow.name) || 'desconhecido';\nconst msg = (e.execution && e.execution.error && e.execution.error.message) || (e.message || 'erro desconhecido');\nconst payload = { messaging_product: 'whatsapp', to: cfg.gestorTelefone, type: 'template', template: { name: 'alerta_erro', language: { code: 'pt_BR' }, components: [ { type: 'body', parameters: [ { type: 'text', text: workflow }, { type: 'text', text: String(msg).slice(0, 300) } ] } ] } };\nreturn [{ json: { payload: payload, phoneNumberId: cfg.phoneNumberId } }];" } },
+    { "id": "3", "name": "Enviar alerta ao gestor", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [680, 300], "parameters": { "method": "POST", "url": "https://graph.facebook.com/v20.0/{{ $json.phoneNumberId }}/messages", "sendHeaders": true, "headerParameters": { "parameters": [ { "name": "Authorization", "value": "Bearer {{ $env.META_WA_ACCESS_TOKEN }}" }, { "name": "Content-Type", "value": "application/json" } ] }, "sendBody": true, "contentType": "raw", "rawContentType": "application/json", "body": "={{ JSON.stringify($json.payload) }}" } }
+  ],
+  "connections": {
+    "Erro capturado": { "main": [ [ { "node": "Config", "type": "main", "index": 0 } ] ] },
+    "Config": { "main": [ [ { "node": "Montar alerta", "type": "main", "index": 0 } ] ] },
+    "Montar alerta": { "main": [ [ { "node": "Enviar alerta ao gestor", "type": "main", "index": 0 } ] ] }
+  }
+}

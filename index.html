@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Painel de câmeras offline – Multiwey Sentry</title>
+<script src="/socket.io/socket.io.js"></script>
+<style>
+:root{--bg:#eef1ef;--panel:#fff;--ink:#17211f;--mut:#5d6b68;--line:#d5dcd9;--brand:#0f5c57;--brandfg:#fff;--red:#c8372d;--redbg:#fbe7e5;--amb:#9a6208;--ambbg:#fbf0d9;--blu:#245a9e;--blubg:#e3edf9;--grn:#26734d;--grnbg:#e0f2e8;--wa:#dcf8c6;--chat:#e9e4da;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#10171a;--panel:#18222a;--ink:#e6eeec;--mut:#98a9a5;--line:#2c3a42;--brand:#4fb5ab;--brandfg:#08201e;--red:#ff8a80;--redbg:#3a1d1d;--amb:#f0b95a;--ambbg:#392c12;--blu:#8dbbf0;--blubg:#162a42;--grn:#7ccf9f;--grnbg:#14301f;--wa:#1f4a35;--chat:#1c2429;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#10171a;--panel:#18222a;--ink:#e6eeec;--mut:#98a9a5;--line:#2c3a42;--brand:#4fb5ab;--brandfg:#08201e;--red:#ff8a80;--redbg:#3a1d1d;--amb:#f0b95a;--ambbg:#392c12;--blu:#8dbbf0;--blubg:#162a42;--grn:#7ccf9f;--grnbg:#14301f;--wa:#1f4a35;--chat:#1c2429;color-scheme:dark}
+*{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 "IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif}
+button,input,textarea{font:inherit;color:inherit}
+.app{display:grid;grid-template-columns:230px 1fr;min-height:100vh}
+aside{background:#031B34;border-right:1px solid var(--line);padding:20px 12px;position:sticky;top:0;align-self:start;height:100vh;color:#e6eeec}
+.logo{font-weight:600;font-size:16px;padding:0 10px 4px;color:#e6eeec}
+.sub{color:#98a9a5;font-size:13px;padding:0 10px 18px}
+nav button{display:flex;width:100%;justify-content:space-between;align-items:center;gap:8px;background:none;border:0;border-left:3px solid transparent;padding:10px 10px;text-align:left;cursor:pointer;border-radius:0 6px 6px 0;color:#e6eeec}
+nav button:hover{background:rgba(255,255,255,.08)}
+nav button.on{border-left-color:var(--brand);background:rgba(255,255,255,.12);font-weight:600}
+nav .n{min-width:24px;text-align:center;font-size:12px;border-radius:10px;padding:1px 7px;background:rgba(255,255,255,.15);color:#e6eeec}
+nav button[data-k=offline] .n{background:var(--redbg);color:var(--red)}
+nav button[data-k=notificado] .n{background:var(--ambbg);color:var(--amb)}
+nav button[data-k=analisando] .n{background:var(--blubg);color:var(--blu)}
+nav button[data-k=aguardando] .n{background:var(--ambbg);color:var(--amb)}
+nav button[data-k=resolvido] .n{background:var(--grnbg);color:var(--grn)}
+.themebtn{margin:18px 10px 0;font-size:13px;color:#98a9a5;background:none;border:1px solid rgba(255,255,255,.2);border-radius:6px;padding:6px 10px;cursor:pointer;display:block;width:calc(100% - 20px);text-align:center}
+main{padding:24px;max-width:1100px;width:100%}
+h1{font-size:22px;margin:0 0 4px}
+.lead{color:var(--mut);margin:0 0 18px;max-width:62ch}
+.note{background:var(--ambbg);color:var(--amb);border-radius:6px;padding:8px 12px;font-size:13px;margin-bottom:18px}
+.kpis{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 14px;min-width:130px}
+.kpi b{display:block;font-size:22px;font-weight:600}
+.kpi span{color:var(--mut);font-size:13px}
+.two{display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
+.box h2{font-size:15px;margin:0 0 12px}
+label{display:block;font-size:13px;color:var(--mut);margin:10px 0 3px}
+input,textarea{width:100%;border:1px solid var(--line);background:var(--bg);border-radius:6px;padding:8px 10px}
+input:focus,textarea:focus,button:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+.btn{border:1px solid var(--line);background:var(--panel);border-radius:6px;padding:7px 12px;cursor:pointer;font-weight:500}
+.btn:hover{background:var(--bg)}
+.btn.p{background:var(--brand);color:var(--brandfg);border-color:var(--brand)}
+.btn.p:hover{filter:brightness(1.1)}
+.btn.s{padding:5px 10px;font-size:13px}
+.grp{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--c,var(--line));border-radius:8px;padding:14px 16px;margin-bottom:12px}
+.grp.offline{--c:var(--red)}.grp.notificado,.grp.validacao{--c:var(--amb)}.grp.analisando{--c:var(--blu)}.grp.aguardando{--c:var(--amb)}.grp.resolvido{--c:var(--grn)}
+.gh{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline}
+.gh b{font-size:16px}.gh span{color:var(--mut);font-size:13px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+.chip{font-size:13px;border:1px solid var(--line);background:var(--bg);border-radius:5px;padding:2px 8px}
+.act{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.sim{font-size:12px;color:var(--mut);margin-right:2px}
+.tag{font-size:12px;border-radius:5px;padding:2px 8px}
+.tag.r{background:var(--redbg);color:var(--red)}.tag.b{background:var(--blubg);color:var(--blu)}.tag.g{background:var(--grnbg);color:var(--grn)}.tag.a{background:var(--ambbg);color:var(--amb)}
+.empty{border:1px dashed var(--line);border-radius:8px;padding:28px;text-align:center;color:var(--mut)}
+.phone{background:var(--chat);border-radius:14px;padding:12px;border:1px solid var(--line)}
+.bub{background:var(--wa);border-radius:8px 8px 8px 2px;padding:9px 11px;font-size:14px;white-space:pre-wrap}
+.wbtn{display:block;width:100%;margin-top:6px;background:var(--panel);border:0;border-radius:8px;padding:8px;color:var(--blu);font-weight:500;text-align:center}
+.chat{background:var(--chat);border-radius:8px;padding:10px;margin-top:10px;max-height:240px;overflow:auto;display:flex;flex-direction:column;gap:6px}
+.m{max-width:80%;padding:6px 10px;border-radius:8px;font-size:14px;background:var(--panel)}
+.m.tec{align-self:flex-end;background:var(--wa)}
+.m.sys{align-self:center;font-size:12px;color:var(--mut);background:none}
+.m small{display:block;color:var(--mut);font-size:11px}
+.send{display:flex;gap:8px;margin-top:8px}
+.toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:5;max-width:90%}
+.toast.on{opacity:1}
+.chip .x{border:0;background:none;cursor:pointer;color:var(--mut);padding:0 0 0 6px;font-size:15px;line-height:1}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-bottom:16px}
+.rk{display:grid;grid-template-columns:140px 1fr 28px;gap:8px;align-items:center;font-size:14px;margin:8px 0}
+.rk span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rk i{display:block;height:10px;border-radius:5px}
+.rk b{text-align:right;font-weight:600}
+.lg{display:flex;gap:14px;font-size:13px;color:var(--mut);margin-bottom:6px;flex-wrap:wrap}
+.lg b{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}
+svg text{fill:var(--mut);font-size:11px;font-family:inherit}
+.gl{stroke:var(--line);stroke-width:1}
+.ln{fill:none;stroke:var(--brand);stroke-width:2.5;stroke-linejoin:round}
+.ar{fill:var(--brand);opacity:.12}
+.dot{fill:var(--brand)}
+.bn{fill:var(--red)}
+.br{fill:var(--grn)}
+.dn{color:var(--grn)}.up{color:var(--red)}
+@keyframes fadeSlide{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
+.grp{animation:fadeSlide .25s cubic-bezier(0.23,1,0.32,1) both}
+.kpi{transition:transform .15s cubic-bezier(0.23,1,0.32,1),box-shadow .15s}
+.kpi:hover{transform:translateY(-2px)}
+.btn{transition:transform .12s cubic-bezier(0.23,1,0.32,1),filter .12s}
+.btn:active{transform:scale(.97)}
+.chip{transition:transform .12s cubic-bezier(0.23,1,0.32,1)}
+.chip:hover{transform:translateY(-1px)}
+.toast{transition:opacity .2s cubic-bezier(0.23,1,0.32,1),transform .2s cubic-bezier(0.23,1,0.32,1)}
+@media (prefers-reduced-motion:reduce){.grp,.kpi,.btn,.chip,.toast{animation:none;transition:none}}
+@media (hover:hover) and (pointer:fine){.btn:hover{filter:brightness(1.05)}}
+@media (max-width:820px){.app{grid-template-columns:1fr}aside{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}nav{display:flex;overflow-x:auto}nav button{border-left:0;border-bottom:3px solid transparent;white-space:nowrap;width:auto;border-radius:0}nav button.on{border-bottom-color:var(--brand)}.two{grid-template-columns:1fr}main{padding:16px}}
+</style>
+</head>
+<body>
+<div class="app">
+<aside>
+ <div class="logo"><img src="logo-sentry.png" alt="Sentry" style="max-width:180px;height:auto;display:block"></div>
+ <nav id="nav"></nav>
+ <button class="themebtn" id="theme">Alternar tema</button>
+</aside>
+<main>
+ <div id="view"></div>
+</main>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const TABS=[
+ {k:"dash",t:"Dashboard",d:""},
+ {k:"offline",t:"Offline",d:"Câmeras cadastradas que ainda não foram avisadas. Agrupadas por responsável: uma mensagem só, mesmo com várias câmeras."},
+ {k:"notificado",t:"Notificados",d:"Mensagem enviada. Aguardando o responsável escolher uma das três opções."},
+ {k:"analisando",t:"Em análise",d:"O responsável informou que está verificando. O bot respeita o intervalo de 24 horas entre mensagens."},
+ {k:"aguardando",t:"Falar com técnico",d:"Fila de atendimento. A conversa acontece aqui e segue pelo WhatsApp."},
+ {k:"validacao",t:"Validar resolução",d:"O responsável informou que resolveu. Confirme se as câmeras voltaram antes de encerrar."},
+ {k:"resolvido",t:"Resolvido",d:"Câmeras que voltaram a funcionar. Serve para acompanhar o histórico e o tempo de solução."},
+ {k:"whatsapp",t:"Central WhatsApp",d:"Conexão por QR Code, status e conversas."},
+ {k:"templates",t:"Modelos",d:"Cadastrar, editar e testar modelos de mensagem com variáveis dinâmicas."},
+ {k:"reports",t:"Relatórios",d:"Indicadores e métricas do sistema."},
+ {k:"botconfig",t:"Config. Bots",d:"Configurar agendamentos, limites e modo de operação dos bots."}
+];
+const H=3600000,now=()=>Date.now();
+let cams=[],phones={},tab="dash",fv={r:"",p:""},pend=[];
+let loadError="";
+async function apiRequest(url,options={}){
+ const response=await fetch(url,options);
+ let data={};
+ try{data=await response.json()}catch(e){}
+ if(!response.ok)throw new Error(data.erro||`Erro HTTP ${response.status}`);
+ return data;
+}
+async function loadFromApi(){
+  try{
+    const data=await apiRequest('/api/cameras');
+    if(!Array.isArray(data))throw new Error("Resposta inválida da API de câmeras");
+    const mapSt = { 'Pendente':'offline','Aguardando resposta':'notificado','Verificando':'analisando','Suporte':'aguardando','Aguardando validacao':'validacao','Resolvido':'resolvido',offline:'offline',notificado:'notificado',analisando:'analisando',aguardando:'aguardando',validacao:'validacao',resolvido:'resolvido' };
+    cams = data.map(c=>Object.assign({since:c.ultima_cobranca?Date.parse(c.ultima_cobranca)||Date.now():Date.now(),resend:Number(c.tentativas)||0,deadline:c.ultima_cobranca?(Date.parse(c.ultima_cobranca)||Date.now())+24*H:Date.now()+24*H,doneAt:c.data_resolucao?Date.parse(c.data_resolucao)||0:0},c,{resp:c.responsavel_nome||"Sem responsável",status:mapSt[c.status]||'offline'}));
+    phones = {};
+    cams.forEach(c=>{ if(c.responsavel_nome && c.responsavel_telefone) phones[c.responsavel_nome]=c.responsavel_telefone; });
+    loadError="";
+  } catch(e){
+    loadError=e.message;
+    cams=[];
+    phones={};
+  }
+  draw();
+}
+loadFromApi();
+const $=s=>document.querySelector(s);
+const groups=st=>{const g={};cams.filter(c=>c.status===st).forEach(c=>(g[c.resp]=g[c.resp]||[]).push(c));return g};
+const ago=ts=>{const h=Math.floor((now()-ts)/H);return h<1?"há menos de 1 h":h<48?`há ${h} h`:`há ${Math.floor(h/24)} dias`};
+const left=d=>{const ms=d-now();if(ms<=0)return null;return `${Math.floor(ms/H)} h ${String(Math.floor(ms%H/60000)).padStart(2,"0")} min`};
+function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("on");clearTimeout(toast.i);toast.i=setTimeout(()=>t.classList.remove("on"),2600)}
+async function persistGroupStatus(resp,status,fromStatuses){
+ const group=cams.filter(c=>c.resp===resp&&fromStatuses.includes(c.status));
+ if(!group.length)return;
+ for(const camera of group){
+  await apiRequest(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,...(status==="Resolvido"?{data_resolucao:new Date().toISOString().slice(0,10)}:{}),...(status==="Pendente"?{data_resolucao:""}:{})})});
+ }
+ await apiRequest("/api/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({camera_id:group.map(c=>c.id).join(","),camera_nome:group.map(c=>c.camera_nome).join(", "),responsavel_telefone:group[0].responsavel_telefone,acao:"STATUS_ATUALIZADO",detalhe:"Status atualizado pelo painel",status_anterior:[...new Set(group.map(c=>c.status))].join(","),status_novo:status})});
+ await loadFromApi();
+}
+async function sendGroupMessage(resp){
+ const group=cams.filter(c=>c.resp===resp&&["offline","analisando"].includes(c.status));
+ if(!group.length)return;
+ const phone=String(group[0].responsavel_telefone||"").replace(/\D/g,"");
+ const consent=await apiRequest(`/api/consent/${encodeURIComponent(phone)}`);
+ if(!consent.opted_in)throw new Error("Este contato ainda não autorizou mensagens automáticas");
+ const cameras=group.map(c=>`• ${c.camera_nome||c.id}`).join("\n");
+ const text=`Olá, ${resp}!\nO Sentry identificou estas câmeras offline:\n${cameras}\n\nResponda 1 para estou verificando, 2 para suporte ou 3 para já resolvi. Responda PARAR para deixar de receber mensagens automáticas.`;
+ await apiRequest("/api/whatsapp/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:phone,text})});
+ const timestamp=new Date().toISOString();
+ for(const camera of group)await apiRequest(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:"Aguardando resposta",tentativas:(Number(camera.tentativas)||0)+1,ultima_cobranca:timestamp})});
+ await apiRequest("/api/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({timestamp,camera_id:group.map(c=>c.id).join(","),camera_nome:group.map(c=>c.camera_nome).join(", "),responsavel_telefone:phone,acao:"COBRANCA_ENVIADA",detalhe:"Mensagem enviada manualmente pelo painel",status_anterior:[...new Set(group.map(c=>c.status))].join(","),status_novo:"Aguardando resposta"})});
+ await loadFromApi();
+}
+const A={
+ async send(r){try{await sendGroupMessage(r);toast(`WhatsApp enviado para ${r}`)}catch(e){toast(`Falha no envio: ${e.message}`)}},
+ async ana(r){try{await persistGroupStatus(r,"Verificando",["notificado"]);toast("Status atualizado")}catch(e){toast(`Falha: ${e.message}`)}},
+ async tec(r){try{await persistGroupStatus(r,"Suporte",["notificado","analisando","validacao"]);toast("Encaminhado para suporte");go("aguardando")}catch(e){toast(`Falha: ${e.message}`)}},
+ async ok(r){try{await persistGroupStatus(r,"Aguardando validacao",["notificado"]);toast("Aguardando validação")}catch(e){toast(`Falha: ${e.message}`)}},
+ async okAna(r){try{await persistGroupStatus(r,"Aguardando validacao",["analisando"]);toast("Aguardando validação")}catch(e){toast(`Falha: ${e.message}`)}},
+ async confirm(r){try{await persistGroupStatus(r,"Resolvido",["validacao"]);toast("Resolução confirmada")}catch(e){toast(`Falha: ${e.message}`)}},
+ async resend(r){try{await sendGroupMessage(r);toast("WhatsApp reenviado")}catch(e){toast(`Falha no reenvio: ${e.message}`)}},
+ async reopen(r){try{await persistGroupStatus(r,"Pendente",["resolvido"]);toast("Câmera reaberta")}catch(e){toast(`Falha: ${e.message}`)}},
+ async chat(r){const phone=String(phones[r]||"").replace(/\D/g,"");if(!phone)return toast("Responsável sem telefone cadastrado");const conversation=waConversations.find(item=>String(item.jid||"").startsWith(phone+"@"));const jid=conversation?.jid||`${phone}@s.whatsapp.net`;await loadMessages(jid);go("whatsapp")},
+ async done(r){try{await persistGroupStatus(r,"Resolvido",["aguardando"]);toast("Atendimento encerrado")}catch(e){toast(`Falha: ${e.message}`)}}
+};
+const esc=value=>String(value??"").replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+const q=esc;
+function btn(cls,a,r,t){return `<button class="btn ${cls}" data-a="${a}" data-r="${q(r)}">${t}</button>`}
+function card(st,r,list){
+ const ids=list.map(c=>`<span class="chip">${esc(c.camera_nome||c.id)}</span>`).join("");
+ let head=`<div class="gh"><b>${esc(r)}</b><span>${esc(phones[r])} · ${list.length} ${list.length>1?"câmeras":"câmera"}</span></div><div class="chips">${ids}</div>`,body="";
+ if(st==="offline"){const old=Math.min(...list.map(c=>c.since));body=`<div class="act"><span class="tag r">offline ${ago(old).replace("há ","há ")}</span>${btn("p s","send",r,"Enviar WhatsApp")}${btn("s","more",r,"+ Câmera")}</div>`}
+ if(st==="notificado"){const rs=Math.max(...list.map(c=>c.resend));body=`<div class="act">${rs?`<span class="tag a">tentativa nº ${rs}</span>`:""}<span class="sim">Atualizar status:</span>${btn("s","ana",r,"EM ANÁLISE")}${btn("s","tec",r,"FALAR COM TÉCNICO")}${btn("s","ok",r,"INFORMOU RESOLUÇÃO")}</div>`}
+ if(st==="analisando"){const d=Math.max(...list.map(c=>c.deadline)),l=left(d),rs=Math.max(...list.map(c=>c.resend));
+  body=`<div class="act">${l?`<span class="tag b">faltam ${l}</span>`:`<span class="tag r">prazo vencido</span>${rs>=2?btn("s","tec",r,"Escalar ao técnico"):""}${btn("p s","resend",r,"Reenviar mensagem")}`}${btn("s","okAna",r,"Informou resolução")}</div>`}
+ if(st==="aguardando")body=`<div class="act"><span class="tag a">na fila</span>${btn("p s","chat",r,"Abrir conversa WhatsApp")}${btn("s","done",r,"Encerrar e dar baixa")}</div>`;
+ if(st==="validacao")body=`<div class="act"><span class="tag a">aguardando conferência</span>${btn("p s","confirm",r,"Confirmar resolução")}${btn("s","tec",r,"Encaminhar para suporte")}</div>`;
+ if(st==="resolvido"){const t=Math.max(...list.map(c=>c.doneAt)),dur=Math.round((t-Math.min(...list.map(c=>c.since)))/H);body=`<div class="act"><span class="tag g">resolvido ${ago(t)}</span><span class="sim">${dur} h até a solução</span>${btn("s","reopen",r,"Reabrir (Sentry ainda offline)")}</div>`}
+ return `<div class="grp ${st}">${head}${body}</div>`
+}
+function preview(){
+ const g=groups("offline"),r=Object.keys(g)[0]||"Mercado Boa Vista",l=(g[r]||[{id:"CAM-0412"},{id:"CAM-0413"}]).map(c=>"• "+(c.camera_nome||c.id)).join("\n");
+ return `<div class="box"><h2>Prévia da mensagem</h2><div class="phone"><div class="bub">Olá, ${esc(r)}.\nO Sentry identificou que estas câmeras estão offline:\n${esc(l)}\n\nResponda 1 para verificar, 2 para suporte ou 3 para informar que resolveu.</div></div><p class="sub" style="padding:10px 0 0">A resposta recebida pelo WhatsApp atualiza o status automaticamente.</p></div>`
+}
+function form(){const rs=Object.keys(phones).map(r=>`<option value="${q(r)}">`).join("");
+return `<div class="box"><h2>Cadastrar câmeras offline</h2>
+<label for="f-r">Responsável</label><input id="f-r" list="dl" value="${q(fv.r)}" placeholder="Nome ou empresa" autocomplete="off"><datalist id="dl">${rs}</datalist>
+<label for="f-p">WhatsApp</label><input id="f-p" value="${q(fv.p)}" placeholder="(65) 99999-0000">
+<label for="f-id">Câmeras deste responsável (${pend.length})</label>
+<div class="send" style="margin-top:0"><input id="f-id" placeholder="Digite o ID e tecle Enter" autocomplete="off"><button class="btn" data-a="addid">Adicionar</button></div>
+<div class="chips">${pend.length?pend.map(i=>`<span class="chip">${i}<button class="x" data-a="rmid" data-r="${q(i)}" aria-label="Remover ${i}">×</button></span>`).join(""):`<span class="sim">Adicione quantas câmeras precisar. Também dá para colar vários IDs de uma vez.</span>`}</div>
+<div class="act" style="margin-top:10px"><button class="btn p" data-a="cad">Cadastrar responsável e câmeras</button></div>
+<p class="sub" style="padding:10px 0 0">Se o responsável já existe, as câmeras entram no mesmo grupo.</p></div>`}
+let waState={status:"disconnected",qr:null,phone:null};
+let waConversations=[];
+let waActiveJid=null;
+let waMessages=[];
+let waError="";
+async function loadConversations(){try{waConversations=await apiRequest("/api/whatsapp/conversations");if(tab==="whatsapp")draw()}catch(e){waError=e.message;if(tab==="whatsapp")draw()}}
+async function loadMessages(jid){waActiveJid=jid;try{waMessages=await apiRequest("/api/whatsapp/messages/"+encodeURIComponent(jid));await apiRequest("/api/whatsapp/read/"+encodeURIComponent(jid),{method:"POST"});if(tab==="whatsapp")draw()}catch(e){waError=e.message;toast(`Falha ao carregar conversa: ${e.message}`)}}
+async function sendWaMsg(){const inp=document.getElementById("wa-input");const v=inp&&inp.value.trim();if(!v||!waActiveJid)return;try{await apiRequest("/api/whatsapp/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:waActiveJid,text:v})});inp.value="";await loadMessages(waActiveJid)}catch(e){toast(`Falha no envio: ${e.message}`)}}
+const waSocket=io();
+waSocket.on("wa:status",s=>{waState=s;draw()});
+waSocket.on("wa:newMessage",async d=>{waError="";await loadConversations();if(waActiveJid===d.jid)await loadMessages(d.jid);if(tab!=="whatsapp")await loadFromApi()});
+async function waConnect(){try{await apiRequest("/api/whatsapp/connect",{method:"POST"});waError="";toast("Conectando...")}catch(e){waError=e.message;toast(`Falha ao conectar: ${e.message}`)}draw()}
+async function waDisconnect(){try{await apiRequest("/api/whatsapp/disconnect",{method:"POST"});waError="";toast("Desconectado")}catch(e){toast(`Falha ao desconectar: ${e.message}`)}draw()}
+function waView(){
+ const T=TABS.find(x=>x.k===tab);
+ const convList = waConversations.map(c=>`<button class="grp" data-open-jid="${q(c.jid)}" style="cursor:pointer;margin-bottom:8px;width:100%;text-align:left;color:var(--ink)"><div class="gh"><b>${esc(c.name||c.jid)}</b><span>${c.unread?`<span class="tag r">${c.unread} não lida(s)</span>`:""}</span></div><div class="sub" style="padding:4px 0 0">${esc((c.lastMessage||"").slice(0,60))}</div></button>`).join("") || `<div class="empty">Nenhuma conversa ainda.</div>`;
+ const chat = waActiveJid ? `<div class="box"><h2>${esc(waActiveJid)}</h2><div class="chat" style="max-height:320px">${waMessages.map(m=>`<div class="m ${m.direction==='out'?'tec':''}"><small>${m.direction==='out'?'Você':'Contato'} ${new Date(m.time).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})}</small>${esc(m.text)}</div>`).join("")}</div><div class="send"><input id="wa-input" placeholder="Escreva uma mensagem..." onkeydown="if(event.key==='Enter')sendWaMsg()"><button class="btn p" onclick="sendWaMsg()">Enviar</button></div></div>` : `<div class="empty">Selecione uma conversa para responder.</div>`;
+ return `<h1>Central WhatsApp</h1><p class="lead">${T.d}</p>
+ <div class="kpis">
+  <div class="kpi"><b>${waState.status}</b><span>status da conexão</span></div>
+  <div class="kpi"><b>${waState.phone||"—"}</b><span>número conectado</span></div>
+  <div class="kpi"><b>${waConversations.length}</b><span>conversas</span></div>
+ </div>
+ <div class="two">
+  <div>
+   <h2 style="font-size:15px;margin:0 0 12px">Conversas</h2>
+   ${convList}
+  </div>
+  <div>
+   <div class="box" style="max-width:420px;margin-bottom:16px">
+    <h2>Conexão por QR Code</h2>
+    ${waError||waState.error?`<p class="note">${esc(waError||waState.error)}</p>`:""}
+    ${waState.status==="open"
+      ? `<p class="lead">Conectado: <b>${waState.phone}</b></p><button class="btn" onclick="waDisconnect()">Desconectar</button>`
+      : waState.qr
+        ? `<p class="lead">Escaneie o QR Code com o WhatsApp:</p><img src="${waState.qr}" alt="QR Code" style="max-width:200px;border:1px solid var(--line);border-radius:8px"><p class="sub" style="padding:10px 0 0">Aguardando leitura...</p><button class="btn" onclick="waConnect()">Gerar novo QR</button>`
+        : `<p class="lead">Desconectado. Clique para gerar o QR Code:</p><button class="btn p" onclick="waConnect()">Conectar WhatsApp</button>`}
+   </div>
+   ${chat}
+  </div>
+ </div>`;
+}
+let waTemplates=[];
+let tplActive=null;
+let tplVars={};
+async function loadTemplates(){try{waTemplates=await apiRequest("/api/templates");if(tab==="templates")draw()}catch(e){toast(`Falha ao carregar modelos: ${e.message}`)}}
+async function saveTemplate(){const id=document.getElementById("tpl-id").value.trim();const nome=document.getElementById("tpl-nome").value.trim();const corpo=document.getElementById("tpl-corpo").value;if(!id||!nome||!corpo)return toast("Preencha id, nome e corpo");try{await apiRequest("/api/templates",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,nome,corpo,variaveis:document.getElementById("tpl-vars").value.trim()})});toast("Modelo salvo");await loadTemplates()}catch(e){toast(`Falha ao salvar: ${e.message}`)}}
+async function deleteTemplate(id){try{await apiRequest("/api/templates/"+encodeURIComponent(id),{method:"DELETE"});toast("Modelo excluído");await loadTemplates()}catch(e){toast(`Falha ao excluir: ${e.message}`)}}
+async function renderTemplate(){const id=document.getElementById("tpl-sel")?.value||tplActive;const vars={};document.querySelectorAll(".tpl-var").forEach(inp=>{vars[inp.dataset.key]=inp.value});try{const data=await apiRequest("/api/templates/"+encodeURIComponent(id)+"/render",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({vars})});document.getElementById("tpl-preview").textContent=data.text||""}catch(e){toast(`Falha ao pré-visualizar: ${e.message}`)}}
+function tplView(){
+ const T=TABS.find(x=>x.k===tab);
+ const list = waTemplates.map(t=>`<button class="grp" data-template-id="${q(t.id)}" style="cursor:pointer;margin-bottom:8px;width:100%;text-align:left;color:var(--ink)"><div class="gh"><b>${esc(t.nome)}</b><span class="sim">${esc(t.id)}</span></div><div class="sub" style="padding:4px 0 0">${esc((t.corpo||"").slice(0,80))}</div></button>`).join("") || `<div class="empty">Nenhum modelo cadastrado.</div>`;
+ const active = waTemplates.find(t=>t.id===tplActive);
+ const vars = active ? (active.variaveis||"").split(",").map(v=>v.trim()).filter(Boolean) : [];
+ const form = active ? `<div class="box"><h2>Editar: ${esc(active.nome)}</h2>
+  <label>Corpo do modelo</label><textarea id="tpl-corpo" rows="6">${esc(active.corpo)}</textarea>
+  <label>Variáveis (separadas por vírgula)</label><input id="tpl-vars" value="${esc(active.variaveis||"")}">
+  <div style="margin-top:10px">${vars.map(v=>`<label>${esc(v)}</label><input class="tpl-var" data-key="${q(v)}" placeholder="valor de ${esc(v)}">`).join("")}</div>
+  <div class="act" style="margin-top:10px"><button class="btn p" onclick="renderTemplate()">Pré-visualizar</button><button class="btn" data-template-delete="${q(active.id)}">Excluir</button></div>
+  <div class="phone" style="margin-top:12px"><div class="bub" id="tpl-preview">Clique em pré-visualizar...</div></div>
+ </div>` : `<div class="box"><p class="sim">Selecione um modelo ao lado para editar.</p></div>`;
+ const create = `<div class="box"><h2>Novo modelo</h2>
+  <label>ID</label><input id="tpl-id" placeholder="ex: cobranca_padrao">
+  <label>Nome</label><input id="tpl-nome" placeholder="ex: Cobrança de câmeras">
+  <label>Corpo (use {variavel})</label><textarea id="tpl-corpo" rows="6" placeholder="Olá, {nome_cliente}! ..."></textarea>
+  <label>Variáveis (separadas por vírgula)</label><input id="tpl-vars" placeholder="nome_cliente,lista_cameras">
+  <div class="act" style="margin-top:10px"><button class="btn p" onclick="saveTemplate()">Salvar modelo</button></div>
+ </div>`;
+ return `<h1>Modelos de mensagem</h1><p class="lead">${T.d}</p>
+ <div class="two">
+  <div>
+   <h2 style="font-size:15px;margin:0 0 12px">Modelos cadastrados</h2>
+   ${list}
+   <div style="height:16px"></div>
+   ${create}
+  </div>
+  <div>${form}</div>
+ </div>`;
+}
+let reportData=null;
+async function loadReports(){try{reportData=await apiRequest("/api/reports");if(tab==="reports")draw()}catch(e){toast(`Falha ao carregar relatórios: ${e.message}`)}}
+function repView(){
+ const T=TABS.find(x=>x.k===tab);
+ const r=reportData||{};
+ const counts=r.counts||{};
+ const kpis=`<div class="kpis">
+  <div class="kpi"><b>${r.total||0}</b><span>câmeras total</span></div>
+  <div class="kpi"><b>${counts['Pendente']||0}</b><span>pendentes</span></div>
+  <div class="kpi"><b>${counts['Aguardando resposta']||0}</b><span>aguardando resposta</span></div>
+  <div class="kpi"><b>${counts['Resolvido']||0}</b><span>resolvidas</span></div>
+  <div class="kpi"><b>${r.cobrancasEnviadas||0}</b><span>cobranças enviadas</span></div>
+  <div class="kpi"><b>${r.erros||0}</b><span>erros</span></div>
+  <div class="kpi"><b>${r.escalonamentos||0}</b><span>escalonamentos</span></div>
+  <div class="kpi"><b>${r.tempoMedioHoras===null?'—':r.tempoMedioHoras+'h'}</b><span>tempo médio resolução</span></div>
+ </div>`;
+ const sts=Object.entries(counts).map(([k,v])=>`<div class="rk"><span>${k}</span><i style="width:${Math.max(v/(r.total||1)*100,2)}%;background:var(--brand)"></i><b>${v}</b></div>`).join("");
+ return `<h1>Relatórios</h1><p class="lead">${T.d}</p>${kpis}<div class="box"><h2>Câmeras por status</h2>${sts||'<div class="empty">Sem dados.</div>'}</div>`;
+}
+let botCfg={};
+let consentList=[];
+async function loadBotCfg(){try{botCfg=await apiRequest("/api/bots/config");consentList=await apiRequest("/api/consents");if(tab==="botconfig")draw()}catch(e){toast(`Falha ao carregar configuração: ${e.message}`)}}
+async function saveBotCfg(){const form=document.getElementById("botcfg-form");const data={};new FormData(form).forEach((v,k)=>{data[k]=v});try{await apiRequest("/api/bots/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});toast("Configuração salva");await loadBotCfg()}catch(e){toast(`Falha ao salvar: ${e.message}`)}}
+async function setContactConsent(phone,optedIn){if(!confirm(optedIn?"Confirma que este contato autorizou receber mensagens automáticas?":"Confirma a remoção da autorização?"))return;try{await apiRequest("/api/consent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone,opted_in:optedIn})});toast(optedIn?"Consentimento registrado":"Consentimento removido");await loadBotCfg()}catch(e){toast(`Falha ao atualizar consentimento: ${e.message}`)}}
+async function runBot(kind){if(!confirm("O bot poderá enviar mensagens reais aos contatos autorizados. Deseja continuar?"))return;try{const result=await apiRequest(`/api/bots/${kind}/run`,{method:"POST"});const sent=result.result?.sent||0,failed=result.result?.failed||0;toast(failed?`${sent} enviado(s), ${failed} falha(s). Confira conexão e logs.`:`Bot concluído: ${sent} envio(s)`)}catch(e){toast(`Falha ao executar bot: ${e.message}`)}}
+function botCfgView(){
+ const T=TABS.find(x=>x.k===tab);
+ const cfg=botCfg||{};
+ const fields=[{k:'billing_hour',l:'Hora do aviso de câmeras offline (0-23)'},{k:'maintenance_hour',l:'Hora do lembrete (0-23)'},{k:'auto_mode',l:'Modo automático (true/false)'},{k:'max_attempts',l:'Limite de tentativas'},{k:'business_hours_start',l:'Início horário comercial'},{k:'business_hours_end',l:'Fim horário comercial'}];
+ const inputs=fields.map(f=>`<label>${f.l}</label><input name="${f.k}" value="${esc(cfg[f.k]||'')}" form="botcfg-form">`).join("");
+ const contactList=cams.filter((camera,index,list)=>list.findIndex(item=>item.responsavel_telefone===camera.responsavel_telefone)===index).map(camera=>{const phone=String(camera.responsavel_telefone||"").replace(/\D/g,"");const optedIn=consentList.some(item=>item.phone===phone&&item.opted_in);return `<div class="act" style="justify-content:space-between;border-top:1px solid var(--line);padding:8px 0"><span>${esc(camera.responsavel_nome)} · ${esc(phone)}</span><button class="btn s" onclick="setContactConsent('${q(phone)}',${!optedIn})">${optedIn?"Desativar bot":"Registrar consentimento"}</button></div>`}).join("")||`<div class="empty">Cadastre responsáveis para gerenciar consentimentos.</div>`;
+ return `<h1>Configuração dos Bots</h1><p class="lead">${T.d}</p>
+ <div class="box" style="max-width:520px">
+  <form id="botcfg-form">${inputs}</form>
+  <div class="act" style="margin-top:12px"><button class="btn p" onclick="saveBotCfg()">Salvar configuração</button><button class="btn" onclick="runBot('billing')">Executar cobrança</button><button class="btn" onclick="runBot('maintenance')">Executar lembrete</button></div>
+  <p class="sub" style="padding:10px 0 0">Os bots leem essas configurações a cada execução.</p>
+ </div><div class="box" style="max-width:520px;margin-top:16px"><h2>Consentimento para mensagens automáticas</h2>${contactList}</div>`;
+}
+function view(){
+ const T=TABS.find(x=>x.k===tab),g=groups(tab),ks=Object.keys(g);
+ if(tab==="whatsapp")return waView();
+ if(tab==="templates")return tplView();
+ if(tab==="reports")return repView();
+ if(tab==="botconfig")return botCfgView();
+ if(tab==="dash")return dash();
+ const kp=`<div class="kpis"><div class="kpi"><b>${cams.filter(c=>c.status!=="resolvido").length}</b><span>câmeras offline</span></div><div class="kpi"><b>${new Set(cams.filter(c=>c.status!=="resolvido").map(c=>c.resp)).size}</b><span>responsáveis</span></div><div class="kpi"><b>${cams.filter(c=>c.status==="resolvido").length}</b><span>resolvidas</span></div></div>`;
+ let list=ks.length?ks.map(r=>card(tab,r,g[r])).join(""):`<div class="empty">Nada por aqui. ${tab==="offline"?"Cadastre uma câmera ao lado para começar.":"Quando houver movimento, os grupos aparecem nesta aba."}</div>`;
+ const side=tab==="offline"?`<div>${form()}<div style="height:16px"></div>${preview()}</div>`:"";
+ return `<h1>${T.t}</h1><p class="lead">${T.d}</p>${kp}${tab==="offline"?`<div class="two"><div>${list}</div>${side}</div>`:list}`
+}
+function dash(){
+ const counts={};
+ cams.forEach(camera=>{counts[camera.status]=(counts[camera.status]||0)+1});
+ const total=cams.length,offline=cams.filter(camera=>camera.status!=="resolvido").length;
+ const resolved=cams.filter(camera=>camera.status==="resolvido").length;
+ const statuses=TABS.filter(item=>["offline","notificado","analisando","aguardando","validacao","resolvido"].includes(item.k));
+ const rows=statuses.map(item=>`<div class="rk"><span>${esc(item.t)}</span><i style="width:${total?Math.max((counts[item.k]||0)/total*100,2):0}%;background:var(--brand)"></i><b>${counts[item.k]||0}</b></div>`).join("");
+ return `<h1>Dashboard</h1><p class="lead">Situação atual das câmeras cadastradas no banco de dados.</p>
+ <div class="kpis"><div class="kpi"><b>${total}</b><span>câmeras cadastradas</span></div><div class="kpi"><b>${offline}</b><span>não resolvidas</span></div><div class="kpi"><b>${resolved}</b><span>resolvidas</span></div><div class="kpi"><b>${Object.keys(phones).length}</b><span>responsáveis</span></div></div>
+ <div class="box"><h2>Câmeras por situação</h2>${rows||'<div class="empty">Cadastre uma câmera para começar.</div>'}</div>
+ <p class="sub" style="padding:10px 0 0">O painel exibe apenas dados reais; não há histórico diário configurado para gráficos.</p>`;
+}
+function pushIds(){const e=$("#f-id");if(!e)return;e.value.split(/[,;\s]+/).map(x=>x.trim().toUpperCase()).filter(Boolean).forEach(i=>{if(!pend.includes(i))pend.push(i)});e.value="";draw()}
+function focusId(){const e=$("#f-id");if(e)e.focus()}
+function draw(){
+ const ICONS={dash:"📊",offline:"⚠️",notificado:"🔔",analisando:"🔍",aguardando:"🛠️",validacao:"☑️",resolvido:"✅",whatsapp:"💬",templates:"📝",reports:"📈",botconfig:"⚙️"};
+ $("#nav").innerHTML=TABS.map(t=>`<button data-k="${t.k}" class="${t.k===tab?"on":""}"><span>${ICONS[t.k]||""} ${t.t}</span>${t.k==="dash"?"":`<span class="n">${new Set(cams.filter(c=>c.status===t.k).map(c=>c.resp)).size}</span>`}</button>`).join("");
+ const keep=document.activeElement&&document.activeElement.id,val=keep&&document.activeElement.value;
+ $("#view").innerHTML=(loadError?`<div class="note">Não foi possível carregar as câmeras: ${esc(loadError)}</div>`:"")+view();
+ if(keep&&$("#"+CSS.escape(keep))){const e=$("#"+CSS.escape(keep));if(val!==undefined)e.value=val}
+}
+function go(k){tab=k;draw();if(k==="whatsapp")loadConversations();if(k==="templates")loadTemplates();if(k==="reports")loadReports();if(k==="botconfig")loadBotCfg()}
+document.addEventListener("click",async e=>{
+const conversation=e.target.closest("[data-open-jid]");if(conversation)return loadMessages(conversation.dataset.openJid);
+const template=e.target.closest("[data-template-id]");if(template){tplActive=template.dataset.templateId;return draw()}
+const removeTemplate=e.target.closest("[data-template-delete]");if(removeTemplate)return deleteTemplate(removeTemplate.dataset.templateDelete);
+ const n=e.target.closest("nav button");if(n)return go(n.dataset.k);
+ const b=e.target.closest("[data-a]");if(!b)return;const a=b.dataset.a,r=b.dataset.r;
+ if(a==="addid"){pushIds();return focusId()}
+ if(a==="rmid"){pend=pend.filter(x=>x!==r);draw();return focusId()}
+ if(a==="more"){fv={r:r,p:phones[r]||""};go("offline");return focusId()}
+ if(a==="cad"){pushIds();const r2=fv.r.trim(),p=fv.p.trim();
+  if(!pend.length||!r2||!p)return toast("Informe o responsável, o WhatsApp e ao menos uma câmera");
+  const novos=pend.filter(i=>!cams.some(c=>c.id===i&&c.status!=="resolvido"));
+  if(!novos.length)return toast("Essas câmeras já estão cadastradas");
+  try{for(const id of novos)await apiRequest("/api/cameras",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,camera_nome:id,local:"",responsavel_nome:r2,responsavel_telefone:p.replace(/\D/g,""),email:"",status:"Pendente",tentativas:0,ultima_cobranca:"",data_resolucao:"",observacoes:""})});toast(`${novos.length} câmera(s) cadastrada(s) para ${r2}`);pend=[];fv={r:"",p:""};await loadFromApi()}catch(error){toast(`Falha ao cadastrar: ${error.message}`)}return}
+ if(A[a])A[a](r)
+});
+document.addEventListener("keydown",e=>{if(e.target.id==="f-id"&&(e.key==="Enter"||e.key===",")){e.preventDefault();pushIds();focusId()}});
+document.addEventListener("input",e=>{const t=e.target;if(t.id==="f-r"){fv.r=t.value;if(phones[t.value]){fv.p=phones[t.value];$("#f-p").value=fv.p}}if(t.id==="f-p")fv.p=t.value});
+$("#theme").onclick=()=>{const d=document.documentElement,dark=getComputedStyle(d).colorScheme==="dark";d.dataset.theme=dark?"light":"dark"};
+setInterval(()=>{if(tab==="analisando")draw()},60000);
+draw();
+</script>
+</body>
+</html>

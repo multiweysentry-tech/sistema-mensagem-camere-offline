@@ -1,0 +1,251 @@
+{
+  "name": "03 - Escalonamento (backend local)",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "id": "0",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        40,
+        300
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "1",
+      "name": "Agendamento",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 18 * * 1-5"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "2",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ],
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "backendUrl",
+              "value": "http://host.docker.internal:3000"
+            },
+            {
+              "name": "gestorTelefone",
+              "value": "5511999990002"
+            }
+          ],
+          "number": [
+            {
+              "name": "limiteTentativas",
+              "value": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "3",
+      "name": "Ler Cameras",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $node['Config'].json.backendUrl }}/api/cameras",
+        "options": {}
+      }
+    },
+    {
+      "id": "4",
+      "name": "Filtrar escalonamento",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const cameras = $input.all().map(i => i.json);\nconst cfg = $('Config').first().json;\nconst limite = Number(cfg.limiteTentativas) || 3;\nconst elegiveis = cameras.filter(c => { const st = String(c.status || '').trim(); if (st === 'Resolvido' || st === 'Aguardando validacao') return false; return (Number(c.tentativas) || 0) >= limite; });\nconst grupos = {};\nfor (const c of elegiveis) {\n  const tel = String(c.responsavel_telefone || '').replace(/\\D/g, '');\n  if (!grupos[tel]) grupos[tel] = { tel: tel, nome: c.responsavel_nome || '', cameras: [], maxTent: 0 };\n  grupos[tel].cameras.push(c);\n  grupos[tel].maxTent = Math.max(grupos[tel].maxTent, Number(c.tentativas) || 0);\n}\nconst out = [];\nfor (const g of Object.values(grupos)) {\n  const lista = g.cameras.map(c => (c.camera_nome + ' (' + (c.local || '') + ')')).join('; ');\n  const payload = { messaging_product: 'whatsapp', to: cfg.gestorTelefone, type: 'template', template: { name: 'escalacao_gestor', language: { code: 'pt_BR' }, components: [ { type: 'body', parameters: [ { type: 'text', text: String(g.maxTent) }, { type: 'text', text: g.nome }, { type: 'text', text: g.tel }, { type: 'text', text: lista } ] } ] } };\n  out.push({ json: { gestor: cfg.gestorTelefone, responsavel: g.nome, telefone: g.tel, lista: lista, tentativas: g.maxTent, payload: payload, cameras: g.cameras } });\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "5",
+      "name": "Enviar ao gestor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v20.0/1452138451316674/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.META_WA_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.payload) }}"
+      }
+    },
+    {
+      "id": "6",
+      "name": "Preparar Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const items = $('Filtrar escalonamento').all();\nconst out = [];\nfor (const it of items) {\n  const j = it.json;\n  out.push({ json: { timestamp: new Date().toISOString(), camera_id: (j.cameras || []).map(c => c.id).join(','), camera_nome: (j.cameras || []).map(c => c.camera_nome).join(', '), responsavel_telefone: j.telefone, acao: 'ESCALONAMENTO', detalhe: 'Escalado ao gestor apos ' + j.tentativas + ' tentativas sem resolucao', status_anterior: 'Aguardando resposta', status_novo: 'Aguardando resposta' } });\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "7",
+      "name": "Registrar Log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $node['Config'].json.backendUrl }}/api/log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json) }}"
+      }
+    }
+  ],
+  "connections": {
+    "Agendamento": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Ler Cameras",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler Cameras": {
+      "main": [
+        [
+          {
+            "node": "Filtrar escalonamento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrar escalonamento": {
+      "main": [
+        [
+          {
+            "node": "Enviar ao gestor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar ao gestor": {
+      "main": [
+        [
+          {
+            "node": "Preparar Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Log": {
+      "main": [
+        [
+          {
+            "node": "Registrar Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

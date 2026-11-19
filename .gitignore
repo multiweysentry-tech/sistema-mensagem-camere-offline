@@ -1,0 +1,15 @@
+node_modules/
+auth_info/
+data.json
+*.log
+.env
+.env.*
+!.env.example
+exec.log
+qr-code.png
+t4.txt
+t5.txt
+test_db.js
+test_out.txt
+exec.log
+*.txt
