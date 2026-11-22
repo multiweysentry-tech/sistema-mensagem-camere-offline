@@ -209,7 +209,7 @@ test('POST camera remains an upsert and normalizes phone numbers', async t => {
   const first = await jsonRequest(baseUrl, '/api/cameras', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...camera, responsavel_telefone: '+55 (65) 99999-1234' })
+    body: JSON.stringify({ ...camera, responsavel_telefone: '+55 (11) 99999-0003' })
   });
   const upsert = await jsonRequest(baseUrl, '/api/cameras', {
     method: 'POST',
