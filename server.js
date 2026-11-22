@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const envPath = path.join(__dirname, '.env');
-if (fs.existsSync(envPath)) {
+if (!process.env.VERCEL && fs.existsSync(envPath)) {
   for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z_]+)\s*=\s*(.*)\s*$/);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
@@ -53,7 +53,8 @@ function validateCamera(camera, partial = false) {
   if (!partial && (!camera.camera_nome || !String(camera.camera_nome).trim())) errors.push('camera_nome obrigatorio');
   if (!partial && (!camera.responsavel_nome || !String(camera.responsavel_nome).trim())) errors.push('responsavel_nome obrigatorio');
   if (!partial && !validPhone(camera.responsavel_telefone)) errors.push('responsavel_telefone invalido');
-  if (camera.responsavel_telefone && !validPhone(camera.responsavel_telefone)) errors.push('responsavel_telefone invalido');
+  if (Object.prototype.hasOwnProperty.call(camera, 'responsavel_telefone') &&
+      !validPhone(camera.responsavel_telefone)) errors.push('responsavel_telefone invalido');
   if (camera.status !== undefined && !CAMERA_STATUSES.includes(camera.status)) errors.push('status invalido');
   if (camera.tentativas !== undefined &&
       (camera.tentativas === '' || !Number.isInteger(Number(camera.tentativas)) || Number(camera.tentativas) < 0)) {
@@ -91,21 +92,6 @@ function createApp(options = {}) {
     if (!apiKey || req.get('x-api-key') === apiKey) return next();
     return res.status(401).json({ codigo: 'UNAUTHORIZED', erro: 'Nao autorizado' });
   });
-
-  if (SERVERLESS) {
-    const unsupported = (req, res) => res.status(501).json({
-      codigo: 'UNSUPPORTED_ON_VERCEL',
-      erro: 'Esta funcao exige um processo Node persistente e sistema de arquivos gravavel. Use npm start em um servidor proprio.'
-    });
-    for (const route of [
-      '/api/whatsapp/connect',
-      '/api/whatsapp/disconnect',
-      '/api/whatsapp/send',
-      '/api/bots/billing/run',
-      '/api/bots/maintenance/run'
-    ]) app.post(route, unsupported);
-    app.get('/api/whatsapp/check/:phone', unsupported);
-  }
 
   app.get('/api/health', async (req, res) => {
     try {
@@ -151,11 +137,12 @@ function createApp(options = {}) {
     const errors = validateCamera(req.body);
     if (errors.length) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erros: errors });
     try {
+      const normalizedId = String(req.body.id).trim();
       const list = await db.getCameras();
-      const exists = list.some(camera => String(camera.id) === String(req.body.id));
+      const exists = list.some(camera => String(camera.id) === normalizedId);
       await db.upsertCamera({
         ...req.body,
-        id: String(req.body.id).trim(),
+        id: normalizedId,
         responsavel_telefone: normalizePhone(req.body.responsavel_telefone),
         status: req.body.status || 'Pendente',
         tentativas: req.body.tentativas === undefined ? 0 : Number(req.body.tentativas),
@@ -165,7 +152,7 @@ function createApp(options = {}) {
         data_resolucao: req.body.data_resolucao || '',
         observacoes: req.body.observacoes || ''
       });
-      const camera = (await db.getCameras()).find(item => String(item.id) === String(req.body.id));
+      const camera = (await db.getCameras()).find(item => String(item.id) === normalizedId);
       return res.status(exists ? 200 : 201).json({ camera });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
@@ -180,7 +167,9 @@ function createApp(options = {}) {
     );
     const errors = validateCamera(fields, true);
     if (errors.length) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erros: errors });
-    if (fields.responsavel_telefone) fields.responsavel_telefone = normalizePhone(fields.responsavel_telefone);
+    if (Object.prototype.hasOwnProperty.call(fields, 'responsavel_telefone')) {
+      fields.responsavel_telefone = normalizePhone(fields.responsavel_telefone);
+    }
     try {
       await db.updateCamera(req.params.id, fields);
       const camera = (await db.getCameras()).find(item => String(item.id) === req.params.id);
@@ -389,7 +378,20 @@ function createApp(options = {}) {
   });
   app.post('/api/templates', async (req, res) => {
     try {
-      await db.upsertTemplate(req.body);
+      const tpl = req.body || {};
+      if (!String(tpl.id || '').trim() || !String(tpl.nome || '').trim() || !String(tpl.corpo || '').trim()) {
+        return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe id, nome e corpo do modelo' });
+      }
+      if (String(tpl.corpo).length > 4096 || String(tpl.nome).length > 200 || String(tpl.id).length > 100) {
+        return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Modelo excede o limite de tamanho permitido' });
+      }
+      await db.upsertTemplate({
+        ...tpl,
+        id: String(tpl.id).trim(),
+        nome: String(tpl.nome).trim(),
+        corpo: String(tpl.corpo),
+        variaveis: String(tpl.variaveis || '')
+      });
       return res.json({ ok: true });
     } catch (error) {
       return res.status(400).json({ erro: error.message });
@@ -397,7 +399,17 @@ function createApp(options = {}) {
   });
   app.put('/api/templates/:id', async (req, res) => {
     try {
-      await db.upsertTemplate({ ...req.body, id: req.params.id });
+      const tpl = req.body || {};
+      if (!String(tpl.nome || '').trim() || !String(tpl.corpo || '').trim()) {
+        return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe nome e corpo do modelo' });
+      }
+      await db.upsertTemplate({
+        ...tpl,
+        id: req.params.id,
+        nome: String(tpl.nome).trim(),
+        corpo: String(tpl.corpo),
+        variaveis: String(tpl.variaveis || '')
+      });
       return res.json({ ok: true });
     } catch (error) {
       return res.status(400).json({ erro: error.message });
@@ -423,14 +435,14 @@ function createApp(options = {}) {
 
   app.post('/api/bots/billing/run', async (req, res) => {
     try {
-      return res.json({ ok: true, result: await bots.runBillingBot() });
+      return res.json({ ok: true, result: await bots.runBillingBot({ force: true }) });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
   });
   app.post('/api/bots/maintenance/run', async (req, res) => {
     try {
-      return res.json({ ok: true, result: await bots.runMaintenanceBot() });
+      return res.json({ ok: true, result: await bots.runMaintenanceBot({ force: true }) });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
