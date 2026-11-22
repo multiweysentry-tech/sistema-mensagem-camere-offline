@@ -217,14 +217,14 @@ async function sendGroupMessage(resp){
   await apiRequest("/api/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({timestamp,camera_id:group.map(c=>c.id).join(","),camera_nome:group.map(c=>c.camera_nome).join(", "),responsavel_telefone:phone,acao:"ENVIO_SEM_CONFIRMACAO",detalhe:`WhatsApp aceitou o envio, mas nao confirmou a entrega. ID: ${result.id||"indisponivel"}`,status_anterior:[...new Set(group.map(c=>c.status))].join(","),status_novo:[...new Set(group.map(c=>c.status))].join(",")})});
   await loadFromApi();
   return result;
-  }finally{
-   sendsInProgress.delete(phone);
-  }
  }
  for(const camera of group)await apiRequest(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:"Aguardando resposta",tentativas:(Number(camera.tentativas)||0)+1,ultima_cobranca:timestamp})});
  await apiRequest("/api/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({timestamp,camera_id:group.map(c=>c.id).join(","),camera_nome:group.map(c=>c.camera_nome).join(", "),responsavel_telefone:phone,acao:"COBRANCA_ENVIADA",detalhe:"Mensagem enviada manualmente pelo painel",status_anterior:[...new Set(group.map(c=>c.status))].join(","),status_novo:"Aguardando resposta"})});
  await loadFromApi();
  return result;
+ }finally{
+  sendsInProgress.delete(phone);
+ }
 }
 const A={
  async send(r){try{showSendResult(await sendGroupMessage(r),`WhatsApp enviado para ${r}`)}catch(e){showSendError(e)}},
