@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Painel de câmeras offline – Multiwey Sentry</title>
-<script src="https://cdn.socket.io/4.8.1/socket.io.min.js" crossorigin="anonymous"></script>
+<script src="/socket.io/socket.io.js" onerror="this.onerror=null;this.src='https://cdn.socket.io/4.8.1/socket.io.min.js'"></script>
 <style>
 :root{--bg:#eef1ef;--panel:#fff;--ink:#17211f;--mut:#5d6b68;--line:#d5dcd9;--brand:#0f5c57;--brandfg:#fff;--red:#c8372d;--redbg:#fbe7e5;--amb:#9a6208;--ambbg:#fbf0d9;--blu:#245a9e;--blubg:#e3edf9;--grn:#26734d;--grnbg:#e0f2e8;--wa:#dcf8c6;--chat:#e9e4da;
 box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
@@ -223,6 +223,7 @@ return `<div class="box"><h2>Cadastrar câmeras offline</h2>
 <div class="act" style="margin-top:10px"><button class="btn p" data-a="cad">Cadastrar responsável e câmeras</button></div>
 <p class="sub" style="padding:10px 0 0">Se o responsável já existe, as câmeras entram no mesmo grupo.</p></div>`}
 let waState={status:"disconnected",qr:null,phone:null};
+async function loadWaStatus(){try{const s=await apiRequest("/api/whatsapp/status");if(JSON.stringify(s)!==JSON.stringify(waState)){waState=s;if(tab==="whatsapp")draw()}}catch(e){}}
 let waConversations=[];
 let waActiveJid=null;
 let waMessages=[];
@@ -240,8 +241,8 @@ try{
     waSocket.on("connect_error",()=>{});
   }
 }catch(e){console.warn("Socket.IO indisponivel:",e.message)}
-async function waConnect(){try{await apiRequest("/api/whatsapp/connect",{method:"POST"});waError="";toast("Conectando...")}catch(e){waError=e.message;toast(`Falha ao conectar: ${e.message}`)}draw()}
-async function waDisconnect(){try{await apiRequest("/api/whatsapp/disconnect",{method:"POST"});waError="";toast("Desconectado")}catch(e){toast(`Falha ao desconectar: ${e.message}`)}draw()}
+async function waConnect(){try{await apiRequest("/api/whatsapp/connect",{method:"POST"});waError="";toast("Conectando...")}catch(e){waError=e.message;toast(`Falha ao conectar: ${e.message}`)}await loadWaStatus();draw()}
+async function waDisconnect(){try{await apiRequest("/api/whatsapp/disconnect",{method:"POST"});waError="";toast("Desconectado")}catch(e){toast(`Falha ao desconectar: ${e.message}`)}await loadWaStatus();draw()}
 function waView(){
  const T=TABS.find(x=>x.k===tab);
  const convList = waConversations.map(c=>`<button class="grp" data-open-jid="${q(c.jid)}" style="cursor:pointer;margin-bottom:8px;width:100%;text-align:left;color:var(--ink)"><div class="gh"><b>${esc(c.name||c.jid)}</b><span>${c.unread?`<span class="tag r">${c.unread} não lida(s)</span>`:""}</span></div><div class="sub" style="padding:4px 0 0">${esc((c.lastMessage||"").slice(0,60))}</div></button>`).join("") || `<div class="empty">Nenhuma conversa ainda.</div>`;
@@ -413,7 +414,7 @@ function draw(){
  $("#view").innerHTML=(loadError?`<div class="note">Não foi possível carregar as câmeras: ${esc(loadError)}</div>`:"")+view();
  if(keep&&$("#"+CSS.escape(keep))){const e=$("#"+CSS.escape(keep));if(val!==undefined)e.value=val}
 }
-function go(k){tab=k;draw();if(k==="whatsapp")loadConversations();if(k==="templates")loadTemplates();if(k==="reports")loadReports();if(k==="botconfig")loadBotCfg()}
+function go(k){tab=k;draw();if(k==="whatsapp"){loadConversations();loadWaStatus()}if(k==="templates")loadTemplates();if(k==="reports")loadReports();if(k==="botconfig")loadBotCfg()}
 document.addEventListener("click",async e=>{
 const conversation=e.target.closest("[data-open-jid]");if(conversation)return loadMessages(conversation.dataset.openJid);
 const template=e.target.closest("[data-template-id]");if(template){tplActive=template.dataset.templateId;return draw()}
@@ -434,6 +435,7 @@ document.addEventListener("keydown",e=>{if(e.target.id==="f-id"&&(e.key==="Enter
 document.addEventListener("input",e=>{const t=e.target;if(t.id==="f-r"){fv.r=t.value;if(phones[t.value]){fv.p=phones[t.value];$("#f-p").value=fv.p}}if(t.id==="f-p")fv.p=t.value});
 $("#theme").onclick=()=>{const d=document.documentElement,dark=getComputedStyle(d).colorScheme==="dark";d.dataset.theme=dark?"light":"dark"};
 setInterval(()=>{if(tab==="analisando")draw()},60000);
+setInterval(()=>{if(tab==="whatsapp"&&(waState.status==="qr"||waState.status==="connecting"))loadWaStatus()},3000);
 draw();
 </script>
 </body>
