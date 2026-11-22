@@ -7,14 +7,36 @@ let bots;
 let loadError = null;
 
 // No Vercel, localhost aponta para a propria funcao e nunca alcanca o Postgres local.
-function hasRemotePostgres() {
-  const host = String(process.env.PG_HOST || '').trim();
-  if (!host || !process.env.PG_PASSWORD) return false;
-  return !/^(localhost|127\.0\.0\.1|::1|0\.0\.0\.0)$/i.test(host);
-}
+const { isRemote: hasRemotePostgres } = require('../db-config');
 
 const unavailable = feature =>
   new Error(`${feature} indisponível no Vercel: exige processo persistente. Use npm start em um servidor próprio.`);
+
+function getBridgeUrl() {
+  const value = String(process.env.WHATSAPP_BRIDGE_URL || '').trim();
+  if (!/^https?:\/\//i.test(value)) return null;
+  return value.replace(/\/+$/, '');
+}
+
+function normalizePhone(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+async function postJson(url, headers, body) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(9000)
+  });
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { erro: text }; }
+  if (!response.ok) {
+    throw new Error(data.erro || data.error || `HTTP ${response.status}`);
+  }
+  return data;
+}
 
 try {
   ({ createApp } = require('../server'));
@@ -22,14 +44,61 @@ try {
   // Sem Postgres remoto, usa armazenamento em memoria para nao retornar 500.
   db = hasRemotePostgres() ? require('../db') : require('../db-memory');
 
-  // Nao carregar whatsapp.js/bots.js no Vercel: o Baileys e ESM e o runtime do Vercel
-  // nao suporta require() de ESM, alem de exigir sistema de arquivos gravavel.
+  const bridgeUrl = getBridgeUrl();
+  const metaToken = String(process.env.META_WA_ACCESS_TOKEN || '').trim();
+  const metaPhoneId = String(process.env.META_WA_PHONE_NUMBER_ID || '').trim();
+  const metaEnabled = Boolean(metaToken && metaPhoneId);
+  const waConfigured = Boolean(bridgeUrl || metaEnabled);
+
   wa = {
     setIO() {},
-    getStatus: () => ({ status: 'unsupported', qr: null, phone: null, error: 'Indisponível no Vercel' }),
+    getStatus: () => waConfigured
+      ? { status: 'open', qr: null, phone: metaEnabled ? metaPhoneId : null, error: null }
+      : { status: 'unsupported', qr: null, phone: null, error: 'WhatsApp não configurado no Vercel' },
     connect: async () => { throw unavailable('WhatsApp'); },
     disconnect: async () => { throw unavailable('WhatsApp'); },
-    sendMessage: async () => { throw unavailable('WhatsApp'); }
+    checkNumber: async phone => {
+      const digits = normalizePhone(phone);
+      if (!digits) throw new Error('Telefone inválido');
+      return { phone: digits, exists: null, jid: `${digits}@s.whatsapp.net` };
+    },
+    sendMessage: async (to, text) => {
+      const digits = normalizePhone(to);
+      if (!/^\d{10,15}$/.test(digits)) throw new Error('Telefone de destino inválido');
+
+      if (bridgeUrl) {
+        const result = await postJson(
+          `${bridgeUrl}/api/whatsapp/send`,
+          {
+            'Content-Type': 'application/json',
+            ...(process.env.WHATSAPP_BRIDGE_KEY
+              ? { 'x-api-key': process.env.WHATSAPP_BRIDGE_KEY }
+              : {})
+          },
+          { to: digits, text }
+        );
+        return result;
+      }
+
+      if (metaEnabled) {
+        const result = await postJson(
+          `https://graph.facebook.com/v20.0/${encodeURIComponent(metaPhoneId)}/messages`,
+          {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${metaToken}`
+          },
+          {
+            messaging_product: 'whatsapp',
+            to: digits,
+            type: 'text',
+            text: { body: text }
+          }
+        );
+        return { ok: true, id: result.messages?.[0]?.id || null };
+      }
+
+      throw unavailable('WhatsApp');
+    }
   };
   bots = {
     getSchedulerStatus: () => 'unsupported',

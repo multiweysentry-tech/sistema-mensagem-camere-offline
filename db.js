@@ -1,11 +1,10 @@
 const { Pool } = require('pg');
+const { getConfig } = require('./db-config');
+
+const config = getConfig();
 
 const pool = new Pool({
-  host: process.env.PG_HOST || '127.0.0.1',
-  port: Number(process.env.PG_PORT || 5433),
-  user: process.env.PG_USER || 'n8n',
-  password: process.env.PG_PASSWORD,
-  database: process.env.PG_DATABASE || 'n8n',
+  ...config,
   // Cada instancia serverless deve manter no maximo uma conexao com o banco.
   max: process.env.VERCEL ? 1 : 10,
   // Evita que uma conexao inalcancavel consuma todo o tempo limite da funcao.
@@ -17,8 +16,8 @@ const pool = new Pool({
 pool.on('error', error => console.error('[DB] Erro em conexao ociosa:', error.message));
 
 async function init() {
-  if (!process.env.PG_PASSWORD) {
-    throw new Error('PG_PASSWORD nao configurada. Defina-a no ambiente ou no arquivo local .env.');
+  if (!config.password) {
+    throw new Error('Senha do Postgres nao configurada. Defina DATABASE_URL ou PG_PASSWORD no ambiente.');
   }
   await pool.query(`
     CREATE TABLE IF NOT EXISTS cameras (
