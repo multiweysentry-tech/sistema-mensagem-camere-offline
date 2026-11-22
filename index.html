@@ -130,7 +130,9 @@ const TABS=[
 const H=3600000,now=()=>Date.now();
 let cams=[],phones={},tab="dash",fv={r:"",p:""},pend=[],storageMode="";
 let loadError="";
-async function checkWaNumber(phone){const digits=String(phone||"").replace(/\D/g,"");if(!/^\d{10,15}$/.test(digits))return {exists:false,error:"Telefone invalido"};try{return await apiRequest("/api/whatsapp/check/"+encodeURIComponent(digits))}catch(e){return {exists:null,error:e.message}}}
+const DDDS_VALIDOS=new Set(['11','12','13','14','15','16','17','18','19','21','22','24','27','28','31','32','33','34','35','37','38','41','42','43','44','45','46','47','48','49','51','53','54','55','61','62','63','64','65','66','67','68','69','71','73','74','75','77','79','81','82','83','84','85','86','87','88','89','91','92','93','94','95','96','97','98','99']);
+function extrairDDD(entrada){let num=String(entrada).split('@')[0].replace(/\D/g,'').replace(/^0+/,'');if(num.startsWith('55')&&(num.length===12||num.length===13))num=num.slice(2);if(num.length!==10&&num.length!==11)return null;const ddd=num.slice(0,2);return DDDS_VALIDOS.has(ddd)?ddd:null}
+async function checkWaNumber(phone){const digits=String(phone||"").replace(/\D/g,"");if(!extrairDDD(digits))return {exists:false,error:"DDD invalido"};try{return await apiRequest("/api/whatsapp/check/"+encodeURIComponent(digits))}catch(e){return {exists:null,error:e.message}}}
 async function apiRequest(url,options={}){
  const response=await fetch(url,options);
  let data={};
@@ -176,7 +178,7 @@ async function sendGroupMessage(resp){
  if(!group.length)return;
  const phone=String(group[0].responsavel_telefone||"").replace(/\D/g,"");
  const numberCheck=await checkWaNumber(phone);
- if(numberCheck.exists===false)throw new Error(`Numero ${phone} nao existe no WhatsApp. Confira o DDD no cadastro.`);
+ if(numberCheck.exists===false)throw new Error(numberCheck.error?`${numberCheck.error}: ${phone}`:`Numero ${phone} nao existe no WhatsApp. Confira o DDD no cadastro.`);
  const consent=await apiRequest(`/api/consent/${encodeURIComponent(phone)}`);
  if(!consent.opted_in)throw new Error("Este contato ainda não autorizou mensagens automáticas");
  const cameras=group.map(c=>`• ${c.camera_nome||c.id}`).join("\n");
@@ -233,7 +235,7 @@ function preview(){
 function form(){const rs=Object.keys(phones).map(r=>`<option value="${q(r)}">`).join("");
 return `<div class="box"><h2>Cadastrar câmeras offline</h2>
 <label for="f-r">Responsável</label><input id="f-r" list="dl" value="${q(fv.r)}" placeholder="Nome ou empresa" autocomplete="off"><datalist id="dl">${rs}</datalist>
-<label for="f-p">WhatsApp</label><input id="f-p" value="${q(fv.p)}" placeholder="(65) 99999-0000">
+<label for="f-p">WhatsApp (DDI + DDD)</label><input id="f-p" value="${q(fv.p)}" placeholder="55 65 99999-0000" inputmode="numeric">
 <label for="f-id">Câmeras deste responsável (${pend.length})</label>
 <div class="send" style="margin-top:0"><input id="f-id" placeholder="Digite o ID e tecle Enter" autocomplete="off"><button class="btn" data-a="addid">Adicionar</button></div>
 <div class="chips">${pend.length?pend.map(i=>`<span class="chip">${i}<button class="x" data-a="rmid" data-r="${q(i)}" aria-label="Remover ${i}">×</button></span>`).join(""):`<span class="sim">Adicione quantas câmeras precisar. Também dá para colar vários IDs de uma vez.</span>`}</div>
@@ -463,7 +465,7 @@ const removeTemplate=e.target.closest("[data-template-delete]");if(removeTemplat
   if(!novos.length)return toast("Essas câmeras já estão cadastradas");
   const digits=p.replace(/\D/g,"");
   const numberCheck=await checkWaNumber(digits);
-  if(numberCheck.exists===false)return toast(`Numero ${digits} nao existe no WhatsApp. Confira o DDD antes de cadastrar.`);
+  if(numberCheck.exists===false)return toast(numberCheck.error?`${numberCheck.error}: ${digits}`:`Numero ${digits} nao existe no WhatsApp. Confira o DDD antes de cadastrar.`);
   if(numberCheck.exists===null)toast(`Nao foi possivel validar o numero no WhatsApp: ${numberCheck.error}. Continuando...`);
   try{for(const id of novos)await apiRequest("/api/cameras",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,camera_nome:id,local:"",responsavel_nome:r2,responsavel_telefone:digits,email:"",status:"Pendente",tentativas:0,ultima_cobranca:"",data_resolucao:"",observacoes:""})});toast(`${novos.length} câmera(s) cadastrada(s) para ${r2}`);pend=[];fv={r:"",p:""};await loadFromApi()}catch(error){toast(`Falha ao cadastrar: ${error.message}`)}return}
  if(A[a])A[a](r)

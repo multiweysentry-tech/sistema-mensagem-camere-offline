@@ -33,7 +33,7 @@ A conexão por QR usa Baileys/WhatsApp Web, não a API oficial Meta. É uma inte
 
 ## Cadastro e avisos
 
-- Ao cadastrar um responsável, o painel consulta o WhatsApp e bloqueia números que não existem na plataforma. Se a consulta estiver indisponível, o cadastro prossegue com aviso.
+- Ao cadastrar um responsável, o painel valida o DDD brasileiro (com ou sem DDI `55`) e consulta o WhatsApp, bloqueando números inexistentes. Se a consulta estiver indisponível, o cadastro prossegue com aviso.
 - O envio de avisos usa **opções clicáveis reais** no WhatsApp: **Em análise**, **Falar com técnico** e **Informei resolução**. Se o WhatsApp não aceitar os botões, o sistema envia texto com as opções `1`, `2` e `3`.
 - As respostas dos botões (ou os números digitados) atualizam o status automaticamente.
 

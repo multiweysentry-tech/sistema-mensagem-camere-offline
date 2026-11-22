@@ -1,6 +1,7 @@
 // Load .env
 const fs = require('fs');
 const path = require('path');
+const { telefoneBrasileiroValido } = require('./phone-utils');
 const envPath = path.join(__dirname, '.env');
 if (!process.env.VERCEL && fs.existsSync(envPath)) {
   for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
@@ -44,6 +45,11 @@ function validPhone(value) {
   return /^\d{10,15}$/.test(normalizePhone(value));
 }
 
+// Cadastro so aceita numeros brasileiros com DDD valido.
+function validCadastroPhone(value) {
+  return telefoneBrasileiroValido(value);
+}
+
 function validateCamera(camera, partial = false) {
   const errors = [];
   if (!camera || typeof camera !== 'object' || Array.isArray(camera)) {
@@ -52,9 +58,9 @@ function validateCamera(camera, partial = false) {
   if (!partial && (!camera.id || !String(camera.id).trim())) errors.push('id obrigatorio');
   if (!partial && (!camera.camera_nome || !String(camera.camera_nome).trim())) errors.push('camera_nome obrigatorio');
   if (!partial && (!camera.responsavel_nome || !String(camera.responsavel_nome).trim())) errors.push('responsavel_nome obrigatorio');
-  if (!partial && !validPhone(camera.responsavel_telefone)) errors.push('responsavel_telefone invalido');
+  if (!partial && !validCadastroPhone(camera.responsavel_telefone)) errors.push('responsavel_telefone invalido');
   if (Object.prototype.hasOwnProperty.call(camera, 'responsavel_telefone') &&
-      !validPhone(camera.responsavel_telefone)) errors.push('responsavel_telefone invalido');
+      !validCadastroPhone(camera.responsavel_telefone)) errors.push('responsavel_telefone invalido');
   if (camera.status !== undefined && !CAMERA_STATUSES.includes(camera.status)) errors.push('status invalido');
   if (camera.tentativas !== undefined &&
       (camera.tentativas === '' || !Number.isInteger(Number(camera.tentativas)) || Number(camera.tentativas) < 0)) {
@@ -272,7 +278,7 @@ function createApp(options = {}) {
   });
   app.get('/api/whatsapp/check/:phone', async (req, res) => {
     const phone = String(req.params.phone || '').replace(/\D/g, '');
-    if (!/^\d{10,15}$/.test(phone)) {
+    if (!validCadastroPhone(phone)) {
       return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Telefone invalido' });
     }
     try {

@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { createApp } = require('./server');
 const { createBots, parseReply, localHour } = require('./bots');
+const { extrairDDD } = require('./phone-utils');
 
 function createMemoryDb(initialCameras = []) {
   const cameras = structuredClone(initialCameras);
@@ -400,4 +401,25 @@ test('partial camera updates and template writes reject invalid required fields'
     body: JSON.stringify({ nome: 'Aviso atualizado', corpo: 'Novo texto {nome}', variaveis: 'nome' })
   });
   assert.equal(updatedTemplate.response.status, 200);
+});
+
+test('DDD invalido e rejeitado no cadastro e na consulta do WhatsApp', async t => {
+  assert.equal(extrairDDD('+55 (65) 98113-3033'), '65');
+  assert.equal(extrairDDD('5565981130338@s.whatsapp.net'), '65');
+  assert.equal(extrairDDD('5510999990003'), null);
+
+  const { baseUrl } = await startServer(t);
+  const invalid = await jsonRequest(baseUrl, '/api/cameras', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...camera, id: 'CAM-DDD-INVALIDO', responsavel_telefone: '5510999990003' })
+  });
+  assert.equal(invalid.response.status, 400);
+
+  const invalidCheck = await jsonRequest(baseUrl, '/api/whatsapp/check/5510999990003');
+  assert.equal(invalidCheck.response.status, 400);
+
+  const validCheck = await jsonRequest(baseUrl, '/api/whatsapp/check/556581367063');
+  assert.equal(validCheck.response.status, 200);
+  assert.equal(validCheck.body.exists, true);
 });
