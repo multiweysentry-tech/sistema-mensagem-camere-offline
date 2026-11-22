@@ -128,6 +128,19 @@ async function connect() {
       }
     });
 
+    socket.ev.on('messages.update', async updates => {
+      for (const { key, update } of updates || []) {
+        if (!key?.fromMe || update?.status === undefined) continue;
+        let pn = null;
+        try {
+          pn = await socket.signalRepository?.lidMapping?.getPNForLID(key.remoteJid);
+        } catch (error) {
+          pn = null;
+        }
+        console.log(`[WhatsApp] ACK ${key.remoteJid} pn=${pn || '-'} ${key.id} status=${update.status}`);
+      }
+    });
+
     socket.ev.on('messages.upsert', async event => {
       for (const message of event.messages || []) {
         if (!message.message) continue;
