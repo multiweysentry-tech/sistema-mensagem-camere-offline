@@ -1,0 +1,13 @@
+{
+  "$schema": "openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api" }
+  ],
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 10,
+      "includeFiles": ["index.html", "logo-sentry.png"]
+    }
+  }
+}

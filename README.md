@@ -58,6 +58,25 @@ Os JSONs em `workflows/` são fluxos antigos para a API oficial Meta e permanece
 | `POST` | `/api/consent` | Registra ou remove autorização de mensagens |
 | `POST` | `/api/bots/billing/run`, `/api/bots/maintenance/run` | Execução manual dos bots |
 
+## Deploy na Vercel
+
+O projeto possui um adaptador serverless em `api/index.js` e o `vercel.json` com rewrite de todas as rotas para ele. Configure o projeto da Vercel com **Framework Preset: Other**, **Build Command** e **Output Directory** vazios.
+
+Defina estas variáveis de ambiente no projeto da Vercel (o `.env` local não é enviado ao GitHub):
+
+- `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE` — o PostgreSQL precisa estar acessível pela rede; `127.0.0.1` não funciona na Vercel.
+- Não defina `API_KEY` neste deploy: o painel não envia o cabeçalho `x-api-key` e todas as chamadas retornariam 401. Proteja o acesso com a **Password Protection** da Vercel ou restrict de IP.
+
+### Limitações do serverless
+
+A Vercel executa funções sob demanda, sem processo persistente e com sistema de arquivos somente leitura. Por isso, nestes endpoints a resposta é `501 UNSUPPORTED_ON_VERCEL`:
+
+- Conexão/desconexão e envio pelo WhatsApp (Baileys precisa manter sessão e gravar `auth_info/`);
+- Execução manual dos bots (depende da conexão WhatsApp);
+- Atualizações em tempo real via Socket.IO (WebSocket não é suportado nas funções; o painel continua funcionando via requisições HTTP, mas sem push automático).
+
+Para usar o sistema completo — WhatsApp, bots e atualizações em tempo real — execute `npm start` em um servidor com processo persistente (VPS, Railway, Render, Fly.io etc.), mantendo `HOST=127.0.0.1` atrás de um proxy reverso.
+
 ## Verificação
 
 Execute `npm test` para rodar os testes automatizados. Os testes usam um banco em memória e não enviam mensagens reais.

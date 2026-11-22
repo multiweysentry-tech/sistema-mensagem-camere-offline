@@ -6,6 +6,8 @@ const pool = new Pool({
   user: process.env.PG_USER || 'n8n',
   password: process.env.PG_PASSWORD,
   database: process.env.PG_DATABASE || 'n8n',
+  // Cada instancia serverless deve manter no maximo uma conexao com o banco.
+  max: process.env.VERCEL ? 1 : 10,
 });
 
 async function init() {

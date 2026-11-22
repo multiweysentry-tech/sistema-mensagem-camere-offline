@@ -12,6 +12,9 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 
+// No Vercel (serverless) nao ha processo persistente nem sistema de arquivos gravavel.
+const SERVERLESS = Boolean(process.env.VERCEL);
+
 const CAMERA_STATUSES = [
   'Pendente',
   'Aguardando resposta',
@@ -88,6 +91,20 @@ function createApp(options = {}) {
     if (!apiKey || req.get('x-api-key') === apiKey) return next();
     return res.status(401).json({ codigo: 'UNAUTHORIZED', erro: 'Nao autorizado' });
   });
+
+  if (SERVERLESS) {
+    const unsupported = (req, res) => res.status(501).json({
+      codigo: 'UNSUPPORTED_ON_VERCEL',
+      erro: 'Esta funcao exige um processo Node persistente e sistema de arquivos gravavel. Use npm start em um servidor proprio.'
+    });
+    for (const route of [
+      '/api/whatsapp/connect',
+      '/api/whatsapp/disconnect',
+      '/api/whatsapp/send',
+      '/api/bots/billing/run',
+      '/api/bots/maintenance/run'
+    ]) app.post(route, unsupported);
+  }
 
   app.get('/api/health', async (req, res) => {
     try {

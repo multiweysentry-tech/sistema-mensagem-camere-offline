@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Painel de câmeras offline – Multiwey Sentry</title>
-<script src="/socket.io/socket.io.js"></script>
+<script src="https://cdn.socket.io/4.8.1/socket.io.min.js" crossorigin="anonymous"></script>
 <style>
 :root{--bg:#eef1ef;--panel:#fff;--ink:#17211f;--mut:#5d6b68;--line:#d5dcd9;--brand:#0f5c57;--brandfg:#fff;--red:#c8372d;--redbg:#fbe7e5;--amb:#9a6208;--ambbg:#fbf0d9;--blu:#245a9e;--blubg:#e3edf9;--grn:#26734d;--grnbg:#e0f2e8;--wa:#dcf8c6;--chat:#e9e4da;
 box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
@@ -231,9 +231,15 @@ async function loadConversations(q){try{waConversations=await apiRequest("/api/w
 function waSearch(q){loadConversations(q)}
 async function loadMessages(jid){waActiveJid=jid;try{waMessages=await apiRequest("/api/whatsapp/messages/"+encodeURIComponent(jid));await apiRequest("/api/whatsapp/read/"+encodeURIComponent(jid),{method:"POST"});if(tab==="whatsapp")draw()}catch(e){waError=e.message;toast(`Falha ao carregar conversa: ${e.message}`)}}
 async function sendWaMsg(){const inp=document.getElementById("wa-input");const v=inp&&inp.value.trim();if(!v||!waActiveJid)return;try{await apiRequest("/api/whatsapp/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:waActiveJid,text:v})});inp.value="";await loadMessages(waActiveJid)}catch(e){toast(`Falha no envio: ${e.message}`)}}
-const waSocket=io();
-waSocket.on("wa:status",s=>{waState=s;draw()});
-waSocket.on("wa:newMessage",async d=>{waError="";await loadConversations();if(waActiveJid===d.jid)await loadMessages(d.jid);if(tab!=="whatsapp")await loadFromApi()});
+let waSocket=null;
+try{
+  if(typeof io==="function"){
+    waSocket=io();
+    waSocket.on("wa:status",s=>{waState=s;draw()});
+    waSocket.on("wa:newMessage",async d=>{waError="";await loadConversations();if(waActiveJid===d.jid)await loadMessages(d.jid);if(tab!=="whatsapp")await loadFromApi()});
+    waSocket.on("connect_error",()=>{});
+  }
+}catch(e){console.warn("Socket.IO indisponivel:",e.message)}
 async function waConnect(){try{await apiRequest("/api/whatsapp/connect",{method:"POST"});waError="";toast("Conectando...")}catch(e){waError=e.message;toast(`Falha ao conectar: ${e.message}`)}draw()}
 async function waDisconnect(){try{await apiRequest("/api/whatsapp/disconnect",{method:"POST"});waError="";toast("Desconectado")}catch(e){toast(`Falha ao desconectar: ${e.message}`)}draw()}
 function waView(){
