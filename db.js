@@ -246,7 +246,12 @@ async function getReports() {
   const cobrancasEnviadas = logs.rows.filter(l => l.acao === 'COBRANCA_ENVIADA').length;
   const erros = logs.rows.filter(l => l.acao === 'ERRO').length;
   const escalonamentos = logs.rows.filter(l => l.acao === 'ESCALONAMENTO').length;
-  return { counts, total: cameras.rows.length, tempoMedioHoras: tempoMedio, cobrancasEnviadas, erros, escalonamentos, resolvidas: resolvidas.length };
+  const today = new Date().toISOString().slice(0,10);
+  const msgsHoje = await pool.query("SELECT direction, COUNT(*) as c FROM messages WHERE time LIKE $1 GROUP BY direction", [today + '%']);
+  let enviadasHoje = 0, recebidasHoje = 0;
+  for (const r of msgsHoje.rows) { if (r.direction === 'out') enviadasHoje = Number(r.c); else recebidasHoje = Number(r.c); }
+  const clientesAguardando = await pool.query("SELECT COUNT(*) as c FROM conversations WHERE unread > 0");
+  return { counts, total: cameras.rows.length, tempoMedioHoras: tempoMedio, cobrancasEnviadas, erros, escalonamentos, resolvidas: resolvidas.length, enviadasHoje, recebidasHoje, clientesAguardando: Number(clientesAguardando.rows[0].c) };
 }
 
 module.exports = { pool, init, getCameras, upsertCamera, updateCamera, deleteCamera, addLog, getLog, hasRecentLog, getConversations, upsertConversation, incrementUnread, getMessages, addMessage, markRead, isBlocked, hasConsent, getConsents, setConsent, block, unblock, getTemplates, getTemplate, upsertTemplate, deleteTemplate, renderTemplate, getBotConfig, setBotConfig, getReports };

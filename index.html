@@ -124,7 +124,8 @@ const TABS=[
  {k:"whatsapp",t:"Central WhatsApp",d:"Conexão por QR Code, status e conversas."},
  {k:"templates",t:"Modelos",d:"Cadastrar, editar e testar modelos de mensagem com variáveis dinâmicas."},
  {k:"reports",t:"Relatórios",d:"Indicadores e métricas do sistema."},
- {k:"botconfig",t:"Config. Bots",d:"Configurar agendamentos, limites e modo de operação dos bots."}
+ {k:"botconfig",t:"Config. Bots",d:"Configurar agendamentos, limites e modo de operação dos bots."},
+ {k:"blocklist",t:"Bloqueio",d:"Gerenciar lista de bloqueio e consentimento de contatos."}
 ];
 const H=3600000,now=()=>Date.now();
 let cams=[],phones={},tab="dash",fv={r:"",p:""},pend=[];
@@ -226,7 +227,8 @@ let waConversations=[];
 let waActiveJid=null;
 let waMessages=[];
 let waError="";
-async function loadConversations(){try{waConversations=await apiRequest("/api/whatsapp/conversations");if(tab==="whatsapp")draw()}catch(e){waError=e.message;if(tab==="whatsapp")draw()}}
+async function loadConversations(q){try{waConversations=await apiRequest("/api/whatsapp/conversations"+(q?"?q="+encodeURIComponent(q):""));if(tab==="whatsapp")draw()}catch(e){waError=e.message;if(tab==="whatsapp")draw()}}
+function waSearch(q){loadConversations(q)}
 async function loadMessages(jid){waActiveJid=jid;try{waMessages=await apiRequest("/api/whatsapp/messages/"+encodeURIComponent(jid));await apiRequest("/api/whatsapp/read/"+encodeURIComponent(jid),{method:"POST"});if(tab==="whatsapp")draw()}catch(e){waError=e.message;toast(`Falha ao carregar conversa: ${e.message}`)}}
 async function sendWaMsg(){const inp=document.getElementById("wa-input");const v=inp&&inp.value.trim();if(!v||!waActiveJid)return;try{await apiRequest("/api/whatsapp/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:waActiveJid,text:v})});inp.value="";await loadMessages(waActiveJid)}catch(e){toast(`Falha no envio: ${e.message}`)}}
 const waSocket=io();
@@ -247,6 +249,7 @@ function waView(){
  <div class="two">
   <div>
    <h2 style="font-size:15px;margin:0 0 12px">Conversas</h2>
+   <input id="wa-search" placeholder="Pesquisar contato..." oninput="waSearch(this.value)" style="margin-bottom:10px;width:100%">
    ${convList}
   </div>
   <div>
@@ -338,13 +341,45 @@ function botCfgView(){
   <p class="sub" style="padding:10px 0 0">Os bots leem essas configurações a cada execução.</p>
  </div><div class="box" style="max-width:520px;margin-top:16px"><h2>Consentimento para mensagens automáticas</h2>${contactList}</div>`;
 }
+let blockData={blocklist:[],consent:[]};
+async function loadBlockData(){ try{ const [b,c]=await Promise.all([fetch("/api/blocklist").then(r=>r.json()), fetch("/api/consent/"+encodeURIComponent("5511999990001")).then(r=>r.json()).catch(()=>({opted_in:false}))]); blockData={blocklist:b,consent:c}; draw(); }catch(e){} }
+async function blockPhone(){ const ph=document.getElementById("blk-phone").value.trim(); const reason=document.getElementById("blk-reason").value.trim(); if(!ph) return toast("Informe o telefone"); await fetch("/api/blocklist",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone:ph,reason})}); toast("Bloqueado"); loadBlockData(); }
+async function unblockPhone(ph){ await fetch("/api/blocklist/"+ph,{method:"DELETE"}); toast("Desbloqueado"); loadBlockData(); }
+async function setConsentUI(){ const ph=document.getElementById("cons-phone").value.trim(); const opt=document.getElementById("cons-opt").value; if(!ph) return toast("Informe o telefone"); await fetch("/api/consent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone:ph,opted_in:opt==="1"})}); toast("Consentimento atualizado"); loadBlockData(); }
+function blockView(){
+ loadBlockData();
+ const T=TABS.find(x=>x.k===tab);
+ const bl=blockData.blocklist||[];
+ const list=bl.map(b=>`<div class="grp" style="margin-bottom:8px"><div class="gh"><b>${b.phone}</b><span class="tag r">bloqueado</span></div><div class="sub" style="padding:4px 0 0">${b.reason||"—"} · ${b.created_at||""}</div><div class="act" style="margin-top:8px"><button class="btn s" onclick="unblockPhone('${b.phone}')">Desbloquear</button></div></div>`).join("")||`<div class="empty">Nenhum contato bloqueado.</div>`;
+ return `<h1>Bloqueio e Consentimento</h1><p class="lead">${T.d}</p>
+ <div class="two">
+  <div>
+   <div class="box"><h2>Bloquear contato</h2>
+    <label>Telefone (DDI+DDD+número)</label><input id="blk-phone" placeholder="5511999990005">
+    <label>Motivo</label><input id="blk-reason" placeholder="opt-out, spam, etc.">
+    <div class="act" style="margin-top:10px"><button class="btn p" onclick="blockPhone()">Bloquear</button></div>
+   </div>
+   <div style="height:16px"></div>
+   <div class="box"><h2>Registrar consentimento (opt-in)</h2>
+    <label>Telefone</label><input id="cons-phone" placeholder="5511999990005">
+    <label>Consentimento</label><select id="cons-opt"><option value="1">Opt-in (autorizado)</option><option value="0">Opt-out (bloqueado)</option></select>
+    <div class="act" style="margin-top:10px"><button class="btn p" onclick="setConsentUI()">Salvar</button></div>
+   </div>
+  </div>
+  <div>
+   <h2 style="font-size:15px;margin:0 0 12px">Contatos bloqueados</h2>
+   ${list}
+  </div>
+ </div>`;
+}
 function view(){
  const T=TABS.find(x=>x.k===tab),g=groups(tab),ks=Object.keys(g);
  if(tab==="whatsapp")return waView();
  if(tab==="templates")return tplView();
  if(tab==="reports")return repView();
  if(tab==="botconfig")return botCfgView();
- if(tab==="dash")return dash();
+ if(tab==="blocklist")return blockView();
+ if(tab==="dash"){ setTimeout(()=>{ fetch("/api/reports").then(r=>r.json()).then(d=>{ const el=document.getElementById("dash-extra"); if(el) el.innerHTML=`<div class="kpi"><b>${d.enviadasHoje||0}</b><span>msgs enviadas hoje</span></div><div class="kpi"><b>${d.recebidasHoje||0}</b><span>msgs recebidas hoje</span></div><div class="kpi"><b>${d.clientesAguardando||0}</b><span>clientes aguardando</span></div><div class="kpi"><b>${d.cobrancasEnviadas||0}</b><span>cobranças enviadas</span></div><div class="kpi"><b>${d.erros||0}</b><span>erros</span></div>`; }); },50); return dash(); }
  const kp=`<div class="kpis"><div class="kpi"><b>${cams.filter(c=>c.status!=="resolvido").length}</b><span>câmeras offline</span></div><div class="kpi"><b>${new Set(cams.filter(c=>c.status!=="resolvido").map(c=>c.resp)).size}</b><span>responsáveis</span></div><div class="kpi"><b>${cams.filter(c=>c.status==="resolvido").length}</b><span>resolvidas</span></div></div>`;
  let list=ks.length?ks.map(r=>card(tab,r,g[r])).join(""):`<div class="empty">Nada por aqui. ${tab==="offline"?"Cadastre uma câmera ao lado para começar.":"Quando houver movimento, os grupos aparecem nesta aba."}</div>`;
  const side=tab==="offline"?`<div>${form()}<div style="height:16px"></div>${preview()}</div>`:"";
@@ -359,13 +394,14 @@ function dash(){
  const rows=statuses.map(item=>`<div class="rk"><span>${esc(item.t)}</span><i style="width:${total?Math.max((counts[item.k]||0)/total*100,2):0}%;background:var(--brand)"></i><b>${counts[item.k]||0}</b></div>`).join("");
  return `<h1>Dashboard</h1><p class="lead">Situação atual das câmeras cadastradas no banco de dados.</p>
  <div class="kpis"><div class="kpi"><b>${total}</b><span>câmeras cadastradas</span></div><div class="kpi"><b>${offline}</b><span>não resolvidas</span></div><div class="kpi"><b>${resolved}</b><span>resolvidas</span></div><div class="kpi"><b>${Object.keys(phones).length}</b><span>responsáveis</span></div></div>
+ <div class="kpis" id="dash-extra"></div>
  <div class="box"><h2>Câmeras por situação</h2>${rows||'<div class="empty">Cadastre uma câmera para começar.</div>'}</div>
  <p class="sub" style="padding:10px 0 0">O painel exibe apenas dados reais; não há histórico diário configurado para gráficos.</p>`;
 }
 function pushIds(){const e=$("#f-id");if(!e)return;e.value.split(/[,;\s]+/).map(x=>x.trim().toUpperCase()).filter(Boolean).forEach(i=>{if(!pend.includes(i))pend.push(i)});e.value="";draw()}
 function focusId(){const e=$("#f-id");if(e)e.focus()}
 function draw(){
- const ICONS={dash:"📊",offline:"⚠️",notificado:"🔔",analisando:"🔍",aguardando:"🛠️",validacao:"☑️",resolvido:"✅",whatsapp:"💬",templates:"📝",reports:"📈",botconfig:"⚙️"};
+ const ICONS={dash:"📊",offline:"⚠️",notificado:"🔔",analisando:"🔍",aguardando:"🛠️",validacao:"☑️",resolvido:"✅",whatsapp:"💬",templates:"📝",reports:"📈",botconfig:"??",blocklist:"?"};
  $("#nav").innerHTML=TABS.map(t=>`<button data-k="${t.k}" class="${t.k===tab?"on":""}"><span>${ICONS[t.k]||""} ${t.t}</span>${t.k==="dash"?"":`<span class="n">${new Set(cams.filter(c=>c.status===t.k).map(c=>c.resp)).size}</span>`}</button>`).join("");
  const keep=document.activeElement&&document.activeElement.id,val=keep&&document.activeElement.value;
  $("#view").innerHTML=(loadError?`<div class="note">Não foi possível carregar as câmeras: ${esc(loadError)}</div>`:"")+view();

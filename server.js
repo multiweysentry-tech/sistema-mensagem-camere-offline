@@ -1,6 +1,15 @@
+// Load .env
+const fs = require('fs');
+const path = require('path');
+const envPath = path.join(__dirname, '.env');
+if (fs.existsSync(envPath)) {
+  for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z_]+)\s*=\s*(.*)\s*$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+  }
+}
 const express = require('express');
 const http = require('http');
-const path = require('path');
 const { Server } = require('socket.io');
 
 const CAMERA_STATUSES = [
@@ -238,7 +247,22 @@ function createApp(options = {}) {
   });
   app.get('/api/whatsapp/conversations', async (req, res) => {
     try {
-      return res.json(await db.getConversations());
+      let list = await db.getConversations();
+      const q = req.query.q;
+      if (q) list = list.filter(c => (c.name||'').toLowerCase().includes(q.toLowerCase()) || (c.jid||'').includes(q));
+      return res.json(list);
+    } catch (error) {
+      return res.status(500).json({ erro: error.message });
+    }
+  });
+  app.get('/api/whatsapp/history/:phone', async (req, res) => {
+    try {
+      const phone = req.params.phone.replace(/\D/g,'');
+      const convs = await db.getConversations();
+      const conv = convs.find(c => c.jid.includes(phone));
+      if (!conv) return res.json({ messages: [], conversation: null });
+      const msgs = await db.getMessages(conv.jid);
+      return res.json({ conversation: conv, messages: msgs });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
