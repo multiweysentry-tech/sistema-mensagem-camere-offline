@@ -245,6 +245,14 @@ async function waConnect(){try{await apiRequest("/api/whatsapp/connect",{method:
 async function waDisconnect(){try{await apiRequest("/api/whatsapp/disconnect",{method:"POST"});waError="";toast("Desconectado")}catch(e){toast(`Falha ao desconectar: ${e.message}`)}await loadWaStatus();draw()}
 function waView(){
  const T=TABS.find(x=>x.k===tab);
+ if(waState.status==="unsupported")return `<h1>Central WhatsApp</h1>
+ <div class="box" style="max-width:560px">
+  <h2>Use o painel local</h2>
+  <p class="lead">O WhatsApp precisa de um servidor Node sempre ativo e de gravar a sessao em disco. O site publicado na Vercel nao pode gerar o QR Code.</p>
+  <p class="sub" style="padding:10px 0">Com o servidor local rodando, abra a Central WhatsApp:</p>
+  <p><a class="btn p" href="http://127.0.0.1:3000/#whatsapp" style="display:inline-block;text-decoration:none">Abrir Central WhatsApp local</a></p>
+  <p class="sub" style="padding:10px 0">Depois, no celular: WhatsApp → Dispositivos conectados → Conectar dispositivo.</p>
+ </div>`;
  const convList = waConversations.map(c=>`<button class="grp" data-open-jid="${q(c.jid)}" style="cursor:pointer;margin-bottom:8px;width:100%;text-align:left;color:var(--ink)"><div class="gh"><b>${esc(c.name||c.jid)}</b><span>${c.unread?`<span class="tag r">${c.unread} não lida(s)</span>`:""}</span></div><div class="sub" style="padding:4px 0 0">${esc((c.lastMessage||"").slice(0,60))}</div></button>`).join("") || `<div class="empty">Nenhuma conversa ainda.</div>`;
  const chat = waActiveJid ? `<div class="box"><h2>${esc(waActiveJid)}</h2><div class="chat" style="max-height:320px">${waMessages.map(m=>`<div class="m ${m.direction==='out'?'tec':''}"><small>${m.direction==='out'?'Você':'Contato'} ${new Date(m.time).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})}</small>${esc(m.text)}</div>`).join("")}</div><div class="send"><input id="wa-input" placeholder="Escreva uma mensagem..." onkeydown="if(event.key==='Enter')sendWaMsg()"><button class="btn p" onclick="sendWaMsg()">Enviar</button></div></div>` : `<div class="empty">Selecione uma conversa para responder.</div>`;
  return `<h1>Central WhatsApp</h1><p class="lead">${T.d}</p>
@@ -436,6 +444,8 @@ document.addEventListener("input",e=>{const t=e.target;if(t.id==="f-r"){fv.r=t.v
 $("#theme").onclick=()=>{const d=document.documentElement,dark=getComputedStyle(d).colorScheme==="dark";d.dataset.theme=dark?"light":"dark"};
 setInterval(()=>{if(tab==="analisando")draw()},60000);
 setInterval(()=>{if(tab==="whatsapp"&&(waState.status==="qr"||waState.status==="connecting"))loadWaStatus()},3000);
+const initial=(location.hash||"").replace("#","");
+if(TABS.some(t=>t.k===initial))tab=initial;
 draw();
 </script>
 </body>
