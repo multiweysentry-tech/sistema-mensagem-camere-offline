@@ -13,6 +13,9 @@ const pool = new Pool({
   idleTimeoutMillis: 10000,
 });
 
+// Uma conexao ociosa pode ser encerrada pelo servidor; sem listener o Node crasha com ECONNRESET.
+pool.on('error', error => console.error('[DB] Erro em conexao ociosa:', error.message));
+
 async function init() {
   if (!process.env.PG_PASSWORD) {
     throw new Error('PG_PASSWORD nao configurada. Defina-a no ambiente ou no arquivo local .env.');
