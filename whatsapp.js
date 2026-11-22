@@ -2,7 +2,9 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion
+  fetchLatestBaileysVersion,
+  generateMessageIDV2,
+  proto
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const QRCode = require('qrcode');
@@ -24,6 +26,15 @@ let reconnectTimer = null;
 let manuallyDisconnected = false;
 let socketGeneration = 0;
 
+// Os IDs precisam ser entendidos tambem pelo parseReply() dos bots.
+const OPTION_BUTTONS = [
+  { id: '1', text: 'Em análise' },
+  { id: '2', text: 'Falar com técnico' },
+  { id: '3', text: 'Informei resolução' }
+];
+const OPTION_FOOTER = 'Escolha uma opção. PARAR encerra as mensagens.';
+const OPTION_FALLBACK_TEXT = '\n\nResponda 1 para estou verificando, 2 para suporte ou 3 para já resolvi.';
+
 function setIO(ioInstance) {
   io = ioInstance;
 }
@@ -36,12 +47,29 @@ function emitStatus() {
   if (io) io.emit('wa:status', getStatus());
 }
 
+function interactiveReplyText(message = {}) {
+  const response = message.interactiveResponseMessage;
+  if (!response) return '';
+  const params = response.nativeFlowResponseMessage?.paramsJson;
+  if (params) {
+    try {
+      const parsed = JSON.parse(params);
+      const legacyIds = { op_1: '1', op_2: '2', op_3: '3' };
+      if (parsed?.id) return legacyIds[parsed.id] || String(parsed.id);
+      if (parsed?.display_text) return String(parsed.display_text);
+    } catch (error) {
+      // Resposta em formato desconhecido: usa o texto simples, se houver.
+    }
+  }
+  return response.body?.text || '';
+}
+
 function textFromMessage(message = {}) {
   const content = message.ephemeralMessage?.message ||
     message.viewOnceMessage?.message ||
     message.viewOnceMessageV2?.message ||
     message;
-  return content.conversation ||
+  return interactiveReplyText(content) || content.conversation ||
     content.extendedTextMessage?.text ||
     content.buttonsResponseMessage?.selectedDisplayText ||
     content.buttonsResponseMessage?.selectedButtonId ||
@@ -207,13 +235,18 @@ async function disconnect() {
   }
   const currentSocket = sock;
   sock = null;
-  if (currentSocket) await currentSocket.logout();
-  fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-  connectionStatus = 'disconnected';
-  qrDataUrl = null;
-  phoneNumber = null;
-  lastError = null;
-  emitStatus();
+  try {
+    if (currentSocket) await currentSocket.logout();
+  } catch (error) {
+    lastError = `Desconectado, mas houve uma falha ao encerrar a sessao: ${error.message}`;
+  } finally {
+    fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+    connectionStatus = 'disconnected';
+    qrDataUrl = null;
+    phoneNumber = null;
+    if (!lastError) lastError = null;
+    emitStatus();
+  }
 }
 
 function normalizeDestination(to) {
@@ -237,6 +270,31 @@ async function checkNumber(to) {
   };
 }
 
+async function recordOutgoing(jid, label, text, id) {
+  const entry = {
+    id: id || `out_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+    from: jid,
+    text,
+    time: new Date().toISOString(),
+    direction: 'out'
+  };
+  await db.upsertConversation(jid, label || jid.split('@')[0], entry.text, entry.time);
+  const inserted = await db.addMessage(jid, entry);
+  if (inserted && io) {
+    io.emit('wa:newMessage', {
+      jid,
+      message: entry,
+      conversation: {
+        jid,
+        name: label || jid.split('@')[0],
+        lastMessage: entry.text,
+        lastTime: entry.time
+      }
+    });
+  }
+  return { ok: true, id: entry.id };
+}
+
 async function sendMessage(to, text) {
   if (!sock || connectionStatus !== 'open') throw new Error('WhatsApp nao conectado');
   const digits = normalizeDestination(to);
@@ -247,28 +305,61 @@ async function sendMessage(to, text) {
   }
 
   const result = await sock.sendMessage(jid, { text: text.trim() });
-  const entry = {
-    id: result?.key?.id || `out_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-    from: jid,
-    text: text.trim(),
-    time: new Date().toISOString(),
-    direction: 'out'
-  };
-  await db.upsertConversation(jid, digits || jid.split('@')[0], entry.text, entry.time);
-  const inserted = await db.addMessage(jid, entry);
-  if (inserted && io) {
-    io.emit('wa:newMessage', {
-      jid,
-      message: entry,
-      conversation: {
-        jid,
-        name: digits || jid.split('@')[0],
-        lastMessage: entry.text,
-        lastTime: entry.time
-      }
-    });
-  }
-  return { ok: true, id: entry.id };
+  return recordOutgoing(jid, digits, text.trim(), result?.key?.id);
 }
 
-module.exports = { connect, disconnect, getStatus, sendMessage, checkNumber, setIO };
+// O Baileys 7 nao expoe "buttons" no sendMessage, mas o protocolo ainda suporta
+// interactiveMessage; enviamos o protobuf diretamente pelo relay do socket.
+async function sendButtons(to, text, buttons, footer) {
+  if (!sock || connectionStatus !== 'open') throw new Error('WhatsApp nao conectado');
+  const digits = normalizeDestination(to);
+  if (!digits) throw new Error('Telefone de destino invalido');
+  const jid = `${digits}@s.whatsapp.net`;
+  if (typeof text !== 'string' || !text.trim() || text.length > 4096) {
+    throw new Error('Mensagem invalida (limite de 4096 caracteres)');
+  }
+  const items = (Array.isArray(buttons) ? buttons : []).slice(0, 3).map((button, index) => ({
+    id: String(button?.id || `op_${index + 1}`),
+    text: String(button?.text || '').trim().slice(0, 20)
+  })).filter(button => button.text);
+  if (items.length < 2) throw new Error('Informe ao menos duas opções clicáveis');
+
+  const message = proto.Message.fromObject({
+    interactiveMessage: {
+      body: { text: text.trim() },
+      footer: { text: String(footer || OPTION_FOOTER).trim().slice(0, 60) },
+      nativeFlowMessage: {
+        messageVersion: 3,
+        buttons: items.map(button => ({
+          name: 'quick_reply',
+          buttonParamsJson: JSON.stringify({ display_text: button.text, id: button.id })
+        }))
+      }
+    }
+  });
+
+  const messageId = generateMessageIDV2(sock.user?.id);
+  await sock.relayMessage(jid, message, { messageId });
+  return recordOutgoing(jid, digits, text.trim(), messageId);
+}
+
+// Envia botoes reais e, se o WhatsApp nao aceitar, cai para texto com numeros.
+async function sendWithOptions(to, text, buttons, footer) {
+  try {
+    return await sendButtons(to, text, buttons || OPTION_BUTTONS, footer);
+  } catch (error) {
+    console.warn('[WhatsApp] Botoes indisponiveis, enviando texto:', error.message);
+    return sendMessage(to, `${String(text || '').trim()}${OPTION_FALLBACK_TEXT}\n\nResponda PARAR para deixar de receber mensagens automaticas.`);
+  }
+}
+
+module.exports = {
+  connect,
+  disconnect,
+  getStatus,
+  sendMessage,
+  sendButtons,
+  sendWithOptions,
+  checkNumber,
+  setIO
+};

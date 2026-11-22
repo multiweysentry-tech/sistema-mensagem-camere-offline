@@ -98,6 +98,64 @@ try {
       }
 
       throw unavailable('WhatsApp');
+    },
+    sendButtons: async (to, text, buttons, footer) => {
+      const digits = normalizePhone(to);
+      if (!/^\d{10,15}$/.test(digits)) throw new Error('Telefone de destino inválido');
+      const options = Array.isArray(buttons) ? buttons.slice(0, 3) : [];
+      if (options.length < 2) throw new Error('Informe ao menos duas opções clicáveis');
+
+      if (bridgeUrl) {
+        return postJson(
+          `${bridgeUrl}/api/whatsapp/send-buttons`,
+          {
+            'Content-Type': 'application/json',
+            ...(process.env.WHATSAPP_BRIDGE_KEY
+              ? { 'x-api-key': process.env.WHATSAPP_BRIDGE_KEY }
+              : {})
+          },
+          { to: digits, text, buttons: options, footer }
+        );
+      }
+
+      if (metaEnabled) {
+        const result = await postJson(
+          `https://graph.facebook.com/v20.0/${encodeURIComponent(metaPhoneId)}/messages`,
+          {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${metaToken}`
+          },
+          {
+            messaging_product: 'whatsapp',
+            to: digits,
+            type: 'interactive',
+            interactive: {
+              type: 'button',
+              body: { text },
+              ...(footer ? { footer: { text: String(footer).slice(0, 60) } } : {}),
+              action: {
+                buttons: options.map((button, index) => ({
+                  type: 'reply',
+                  reply: {
+                    id: String(button?.id || `op_${index + 1}`),
+                    title: String(button?.text || '').slice(0, 20)
+                  }
+                }))
+              }
+            }
+          }
+        );
+        return { ok: true, id: result.messages?.[0]?.id || null };
+      }
+
+      throw unavailable('WhatsApp');
+    },
+    sendWithOptions: async (to, text, buttons, footer) => {
+      try {
+        return await wa.sendButtons(to, text, buttons, footer);
+      } catch (error) {
+        return wa.sendMessage(to, `${String(text || '').trim()}\n\nResponda 1 para estou verificando, 2 para suporte ou 3 para já resolvi. Responda PARAR para deixar de receber mensagens automáticas.`);
+      }
     }
   };
   bots = {

@@ -254,6 +254,22 @@ function createApp(options = {}) {
       return res.status(503).json({ codigo: 'WHATSAPP_SEND_FAILED', erro: error.message });
     }
   });
+  app.post('/api/whatsapp/send-options', async (req, res) => {
+    const { to, text, buttons, footer } = req.body || {};
+    if ((!validPhone(to) && !/^\d{10,15}@s\.whatsapp\.net$/.test(String(to || ''))) ||
+        typeof text !== 'string' || !text.trim() || text.length > 4096) {
+      return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe um telefone e uma mensagem valida (ate 4096 caracteres)' });
+    }
+    if (buttons !== undefined && (!Array.isArray(buttons) || buttons.length < 2 || buttons.length > 3)) {
+      return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe de 2 a 3 botoes' });
+    }
+    try {
+      const result = await wa.sendWithOptions(String(to), text.trim(), buttons, footer);
+      return res.json(result);
+    } catch (error) {
+      return res.status(503).json({ codigo: 'WHATSAPP_SEND_FAILED', erro: error.message });
+    }
+  });
   app.get('/api/whatsapp/check/:phone', async (req, res) => {
     const phone = String(req.params.phone || '').replace(/\D/g, '');
     if (!/^\d{10,15}$/.test(phone)) {

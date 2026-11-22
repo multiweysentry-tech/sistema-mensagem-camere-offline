@@ -108,10 +108,10 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron } = {}
     return [...groups.values()];
   }
 
-  async function runBillingBot({ now = new Date() } = {}) {
+  async function runBillingBot({ now = new Date(), force = false } = {}) {
     const config = await getConfig();
-    if (config.auto_mode === 'false') return { sent: 0, skipped: 'automatic mode disabled' };
-    if (!isBusinessHours(config, now)) return { sent: 0, skipped: 'outside business hours' };
+    if (!force && config.auto_mode === 'false') return { sent: 0, skipped: 'automatic mode disabled' };
+    if (!force && !isBusinessHours(config, now)) return { sent: 0, skipped: 'outside business hours' };
 
     const cameras = await db.getCameras();
     const eligible = cameras.filter(camera => {
@@ -131,10 +131,10 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron } = {}
 
         const attempts = Math.max(...group.cameras.map(camera => Number(camera.tentativas) || 0)) + 1;
         const cameraList = group.cameras.map(camera => `• ${camera.camera_nome || camera.id}`).join('\n');
-        const message = `Olá, ${group.name}!\nO Sentry identificou que estas câmeras estão offline:\n${cameraList}\n\nResponda 1 para estou verificando, 2 para suporte ou 3 para já resolvi. Responda PARAR para deixar de receber mensagens automáticas.`;
+        const message = `Olá, ${group.name}!\nO Sentry identificou que estas câmeras estão offline:\n${cameraList}\n\nEscolha uma das opções abaixo para atualizar o status.`;
 
         try {
-          await wa.sendMessage(group.phone, message);
+          await wa.sendWithOptions(group.phone, message);
           const timestamp = now.toISOString();
           await db.addLog({
             timestamp,
@@ -175,10 +175,10 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron } = {}
     return { sent, failed };
   }
 
-  async function runMaintenanceBot({ now = new Date() } = {}) {
+  async function runMaintenanceBot({ now = new Date(), force = false } = {}) {
     const config = await getConfig();
-    if (config.auto_mode === 'false') return { sent: 0, skipped: 'automatic mode disabled' };
-    if (!isBusinessHours(config, now)) return { sent: 0, skipped: 'outside business hours' };
+    if (!force && config.auto_mode === 'false') return { sent: 0, skipped: 'automatic mode disabled' };
+    if (!force && !isBusinessHours(config, now)) return { sent: 0, skipped: 'outside business hours' };
 
     const cameras = await db.getCameras();
     const groups = groupByPhone(cameras.filter(camera => String(camera.status || '').trim() === 'Pendente'));
@@ -192,7 +192,7 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron } = {}
         if (await hasRecentSend(group.phone, ['COBRANCA_ENVIADA', 'LEMBRETE_MANUTENCAO'], new Date(now.getTime() - 24 * 60 * 60 * 1000))) continue;
         const cameraList = group.cameras.map(camera => `• ${camera.camera_nome || camera.id}${camera.local ? ` (${camera.local})` : ''}`).join('\n');
         try {
-          await wa.sendMessage(group.phone, `Lembrete do Sentry: estas câmeras estão offline:\n${cameraList}\nPor favor, verifique e responda 1 para estou verificando, 2 para suporte ou 3 para já resolvi. Responda PARAR para deixar de receber mensagens automáticas.`);
+          await wa.sendWithOptions(group.phone, `Lembrete do Sentry: estas câmeras estão offline:\n${cameraList}\nPor favor, verifique e escolha uma das opções abaixo.`);
           await db.addLog({
             timestamp: now.toISOString(),
             camera_id: group.cameras.map(camera => camera.id).join(','),

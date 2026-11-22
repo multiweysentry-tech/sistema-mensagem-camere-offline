@@ -106,6 +106,17 @@ function createTestWa(db) {
       if (!connected) throw new Error('WhatsApp nao conectado');
       db.sentMessages.push({ to, text });
       return { ok: true, id: `out_${db.sentMessages.length}` };
+    },
+    async sendButtons(to, text, buttons) {
+      if (!connected) throw new Error('WhatsApp nao conectado');
+      db.sentMessages.push({ to, text, buttons });
+      return { ok: true, id: `out_${db.sentMessages.length}` };
+    },
+    async sendWithOptions(to, text, buttons) {
+      return this.sendButtons(to, text, buttons);
+    },
+    async checkNumber(to) {
+      return { phone: String(to).replace(/\D/g, ''), exists: true };
     }
   };
 }
@@ -342,4 +353,51 @@ test('incoming WhatsApp choices update only matching cameras and parse common re
   assert.equal(parseReply('Preciso falar com técnico').status, 'Suporte');
   assert.equal(parseReply('PARAR').intent, 'opt_out');
   assert.equal(localHour(new Date('2026-11-16T13:00:00.000Z')), 9);
+});
+
+test('manual bots ignore automatic mode and can run outside business hours', async t => {
+  const { baseUrl, db, wa } = await startServer(t, [camera]);
+  await db.setConsent(camera.responsavel_telefone, true);
+  await db.setBotConfig('auto_mode', 'false');
+  await wa.connect();
+
+  const billing = await jsonRequest(baseUrl, '/api/bots/billing/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert.equal(billing.response.status, 200);
+  assert.equal(billing.body.result.sent, 1);
+});
+
+test('partial camera updates and template writes reject invalid required fields', async t => {
+  const { baseUrl } = await startServer(t, [camera]);
+  const invalidPhone = await jsonRequest(baseUrl, `/api/cameras/${camera.id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ responsavel_telefone: '' })
+  });
+  assert.equal(invalidPhone.response.status, 400);
+
+  const invalidTemplate = await jsonRequest(baseUrl, '/api/templates', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: '', nome: '', corpo: '' })
+  });
+  assert.equal(invalidTemplate.response.status, 400);
+  assert.equal(invalidTemplate.body.codigo, 'VALIDATION_ERROR');
+
+  const savedTemplate = await jsonRequest(baseUrl, '/api/templates', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: 'aviso', nome: 'Aviso', corpo: 'Olá {nome}', variaveis: 'nome' })
+  });
+  assert.equal(savedTemplate.response.status, 200);
+
+  const updatedTemplate = await jsonRequest(baseUrl, '/api/templates/aviso', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nome: 'Aviso atualizado', corpo: 'Novo texto {nome}', variaveis: 'nome' })
+  });
+  assert.equal(updatedTemplate.response.status, 200);
 });

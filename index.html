@@ -128,8 +128,9 @@ const TABS=[
  {k:"blocklist",t:"Bloqueio",d:"Gerenciar lista de bloqueio e consentimento de contatos."}
 ];
 const H=3600000,now=()=>Date.now();
-let cams=[],phones={},tab="dash",fv={r:"",p:""},pend=[];
+let cams=[],phones={},tab="dash",fv={r:"",p:""},pend=[],storageMode="";
 let loadError="";
+async function checkWaNumber(phone){const digits=String(phone||"").replace(/\D/g,"");if(!/^\d{10,15}$/.test(digits))return {exists:false,error:"Telefone invalido"};try{return await apiRequest("/api/whatsapp/check/"+encodeURIComponent(digits))}catch(e){return {exists:null,error:e.message}}}
 async function apiRequest(url,options={}){
  const response=await fetch(url,options);
  let data={};
@@ -141,6 +142,8 @@ async function loadFromApi(){
   try{
     const data=await apiRequest('/api/cameras');
     if(!Array.isArray(data))throw new Error("Resposta inválida da API de câmeras");
+    const health=await apiRequest('/api/health');
+    storageMode=health.storage||"postgres";
     const mapSt = { 'Pendente':'offline','Aguardando resposta':'notificado','Verificando':'analisando','Suporte':'aguardando','Aguardando validacao':'validacao','Resolvido':'resolvido',offline:'offline',notificado:'notificado',analisando:'analisando',aguardando:'aguardando',validacao:'validacao',resolvido:'resolvido' };
     cams = data.map(c=>Object.assign({since:c.ultima_cobranca?Date.parse(c.ultima_cobranca)||Date.now():Date.now(),resend:Number(c.tentativas)||0,deadline:c.ultima_cobranca?(Date.parse(c.ultima_cobranca)||Date.now())+24*H:Date.now()+24*H,doneAt:c.data_resolucao?Date.parse(c.data_resolucao)||0:0},c,{resp:c.responsavel_nome||"Sem responsável",status:mapSt[c.status]||'offline'}));
     phones = {};
@@ -172,11 +175,13 @@ async function sendGroupMessage(resp){
  const group=cams.filter(c=>c.resp===resp&&["offline","analisando"].includes(c.status));
  if(!group.length)return;
  const phone=String(group[0].responsavel_telefone||"").replace(/\D/g,"");
+ const numberCheck=await checkWaNumber(phone);
+ if(numberCheck.exists===false)throw new Error(`Numero ${phone} nao existe no WhatsApp. Confira o DDD no cadastro.`);
  const consent=await apiRequest(`/api/consent/${encodeURIComponent(phone)}`);
  if(!consent.opted_in)throw new Error("Este contato ainda não autorizou mensagens automáticas");
  const cameras=group.map(c=>`• ${c.camera_nome||c.id}`).join("\n");
- const text=`Olá, ${resp}!\nO Sentry identificou estas câmeras offline:\n${cameras}\n\nResponda 1 para estou verificando, 2 para suporte ou 3 para já resolvi. Responda PARAR para deixar de receber mensagens automáticas.`;
- await apiRequest("/api/whatsapp/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:phone,text})});
+ const text=`Olá, ${resp}!\nO Sentry identificou estas câmeras offline:\n${cameras}\n\nEscolha uma das opções abaixo para atualizar o status.`;
+ await apiRequest("/api/whatsapp/send-options",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:phone,text,footer:"Escolha uma opção. PARAR encerra as mensagens."})});
  const timestamp=new Date().toISOString();
  for(const camera of group)await apiRequest(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:"Aguardando resposta",tentativas:(Number(camera.tentativas)||0)+1,ultima_cobranca:timestamp})});
  await apiRequest("/api/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({timestamp,camera_id:group.map(c=>c.id).join(","),camera_nome:group.map(c=>c.camera_nome).join(", "),responsavel_telefone:phone,acao:"COBRANCA_ENVIADA",detalhe:"Mensagem enviada manualmente pelo painel",status_anterior:[...new Set(group.map(c=>c.status))].join(","),status_novo:"Aguardando resposta"})});
@@ -194,7 +199,19 @@ const A={
  async chat(r){const phone=String(phones[r]||"").replace(/\D/g,"");if(!phone)return toast("Responsável sem telefone cadastrado");const conversation=waConversations.find(item=>String(item.jid||"").startsWith(phone+"@"));const jid=conversation?.jid||`${phone}@s.whatsapp.net`;await loadMessages(jid);go("whatsapp")},
  async done(r){try{await persistGroupStatus(r,"Resolvido",["aguardando"]);toast("Atendimento encerrado")}catch(e){toast(`Falha: ${e.message}`)}}
 };
-const esc=value=>String(value??"").replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+const cleanText=value=>String(value??"")
+ .replace(/C�mara/gi,"Câmara")
+ .replace(/C�mera/gi,"Câmera")
+ .replace(/Propriet�rio/gi,"Proprietário")
+ .replace(/propriet�rio/gi,"proprietário")
+ .replace(/c�mara/gi,"câmara")
+ .replace(/c�mera/gi,"câmera")
+ .replace(/Voc�/gi,"Você")
+ .replace(/voc�/gi,"você")
+ .replace(/est�o/gi,"estão")
+ .replace(/n�o/gi,"não")
+ .replace(/�/g,"");
+const esc=value=>cleanText(value).replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
 const q=esc;
 function btn(cls,a,r,t){return `<button class="btn ${cls}" data-a="${a}" data-r="${q(r)}">${t}</button>`}
 function card(st,r,list){
@@ -211,7 +228,7 @@ function card(st,r,list){
 }
 function preview(){
  const g=groups("offline"),r=Object.keys(g)[0]||"Mercado Boa Vista",l=(g[r]||[{id:"CAM-0412"},{id:"CAM-0413"}]).map(c=>"• "+(c.camera_nome||c.id)).join("\n");
- return `<div class="box"><h2>Prévia da mensagem</h2><div class="phone"><div class="bub">Olá, ${esc(r)}.\nO Sentry identificou que estas câmeras estão offline:\n${esc(l)}\n\nResponda 1 para verificar, 2 para suporte ou 3 para informar que resolveu.</div></div><p class="sub" style="padding:10px 0 0">A resposta recebida pelo WhatsApp atualiza o status automaticamente.</p></div>`
+ return `<div class="box"><h2>Prévia da mensagem</h2><div class="phone"><div class="bub">Olá, ${esc(r)}.\nO Sentry identificou que estas câmeras estão offline:\n${esc(l)}\n\nEscolha uma das opções abaixo.</div><div class="act" style="padding:8px 0 0"><span class="tag b">Em análise</span><span class="tag b">Falar com técnico</span><span class="tag b">Informei resolução</span></div></div><p class="sub" style="padding:10px 0 0">As opções clicáveis atualizam o status automaticamente pelo WhatsApp.</p></div>`
 }
 function form(){const rs=Object.keys(phones).map(r=>`<option value="${q(r)}">`).join("");
 return `<div class="box"><h2>Cadastrar câmeras offline</h2>
@@ -287,6 +304,7 @@ let tplVars={};
 async function loadTemplates(){try{waTemplates=await apiRequest("/api/templates");if(tab==="templates")draw()}catch(e){toast(`Falha ao carregar modelos: ${e.message}`)}}
 async function saveTemplate(){const id=document.getElementById("tpl-id").value.trim();const nome=document.getElementById("tpl-nome").value.trim();const corpo=document.getElementById("tpl-corpo").value;if(!id||!nome||!corpo)return toast("Preencha id, nome e corpo");try{await apiRequest("/api/templates",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,nome,corpo,variaveis:document.getElementById("tpl-vars").value.trim()})});toast("Modelo salvo");await loadTemplates()}catch(e){toast(`Falha ao salvar: ${e.message}`)}}
 async function deleteTemplate(id){try{await apiRequest("/api/templates/"+encodeURIComponent(id),{method:"DELETE"});toast("Modelo excluído");await loadTemplates()}catch(e){toast(`Falha ao excluir: ${e.message}`)}}
+async function saveTemplateEdit(){const id=tplActive;if(!id)return;const nome=document.getElementById("tpl-edit-nome")?.value.trim();const corpo=document.getElementById("tpl-edit-corpo")?.value;const variaveis=document.getElementById("tpl-edit-vars")?.value.trim();if(!nome||!corpo)return toast("Preencha nome e corpo");try{await apiRequest("/api/templates/"+encodeURIComponent(id),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({nome,corpo,variaveis})});toast("Modelo atualizado");await loadTemplates()}catch(e){toast(`Falha ao atualizar: ${e.message}`)}}
 async function renderTemplate(){const id=document.getElementById("tpl-sel")?.value||tplActive;const vars={};document.querySelectorAll(".tpl-var").forEach(inp=>{vars[inp.dataset.key]=inp.value});try{const data=await apiRequest("/api/templates/"+encodeURIComponent(id)+"/render",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({vars})});document.getElementById("tpl-preview").textContent=data.text||""}catch(e){toast(`Falha ao pré-visualizar: ${e.message}`)}}
 function tplView(){
  const T=TABS.find(x=>x.k===tab);
@@ -294,10 +312,11 @@ function tplView(){
  const active = waTemplates.find(t=>t.id===tplActive);
  const vars = active ? (active.variaveis||"").split(",").map(v=>v.trim()).filter(Boolean) : [];
  const form = active ? `<div class="box"><h2>Editar: ${esc(active.nome)}</h2>
-  <label>Corpo do modelo</label><textarea id="tpl-corpo" rows="6">${esc(active.corpo)}</textarea>
-  <label>Variáveis (separadas por vírgula)</label><input id="tpl-vars" value="${esc(active.variaveis||"")}">
+  <label>Nome</label><input id="tpl-edit-nome" value="${esc(active.nome)}">
+  <label>Corpo do modelo</label><textarea id="tpl-edit-corpo" rows="6">${esc(active.corpo)}</textarea>
+  <label>Variáveis (separadas por vírgula)</label><input id="tpl-edit-vars" value="${esc(active.variaveis||"")}">
   <div style="margin-top:10px">${vars.map(v=>`<label>${esc(v)}</label><input class="tpl-var" data-key="${q(v)}" placeholder="valor de ${esc(v)}">`).join("")}</div>
-  <div class="act" style="margin-top:10px"><button class="btn p" onclick="renderTemplate()">Pré-visualizar</button><button class="btn" data-template-delete="${q(active.id)}">Excluir</button></div>
+  <div class="act" style="margin-top:10px"><button class="btn p" onclick="saveTemplateEdit()">Salvar edição</button><button class="btn" onclick="renderTemplate()">Pré-visualizar</button><button class="btn" data-template-delete="${q(active.id)}">Excluir</button></div>
   <div class="phone" style="margin-top:12px"><div class="bub" id="tpl-preview">Clique em pré-visualizar...</div></div>
  </div>` : `<div class="box"><p class="sim">Selecione um modelo ao lado para editar.</p></div>`;
  const create = `<div class="box"><h2>Novo modelo</h2>
@@ -357,15 +376,15 @@ function botCfgView(){
  </div><div class="box" style="max-width:520px;margin-top:16px"><h2>Consentimento para mensagens automáticas</h2>${contactList}</div>`;
 }
 let blockData={blocklist:[],consent:[]};
-async function loadBlockData(){ try{ const [b,c]=await Promise.all([fetch("/api/blocklist").then(r=>r.json()), fetch("/api/consent/"+encodeURIComponent("5511999990001")).then(r=>r.json()).catch(()=>({opted_in:false}))]); blockData={blocklist:b,consent:c}; draw(); }catch(e){} }
-async function blockPhone(){ const ph=document.getElementById("blk-phone").value.trim(); const reason=document.getElementById("blk-reason").value.trim(); if(!ph) return toast("Informe o telefone"); await fetch("/api/blocklist",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone:ph,reason})}); toast("Bloqueado"); loadBlockData(); }
-async function unblockPhone(ph){ await fetch("/api/blocklist/"+ph,{method:"DELETE"}); toast("Desbloqueado"); loadBlockData(); }
-async function setConsentUI(){ const ph=document.getElementById("cons-phone").value.trim(); const opt=document.getElementById("cons-opt").value; if(!ph) return toast("Informe o telefone"); await fetch("/api/consent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone:ph,opted_in:opt==="1"})}); toast("Consentimento atualizado"); loadBlockData(); }
+async function loadBlockData(){ try{ blockData.blocklist=await apiRequest("/api/blocklist"); if(tab==="blocklist")draw(); }catch(e){toast(`Falha ao carregar bloqueios: ${e.message}`)} }
+async function blockPhone(){ const ph=document.getElementById("blk-phone").value.trim(); const reason=document.getElementById("blk-reason").value.trim(); if(!ph) return toast("Informe o telefone"); try{await apiRequest("/api/blocklist",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone:ph,reason})});toast("Bloqueado");await loadBlockData()}catch(e){toast(`Falha ao bloquear: ${e.message}`)} }
+async function unblockPhone(ph){ try{await apiRequest("/api/blocklist/"+encodeURIComponent(ph),{method:"DELETE"});toast("Desbloqueado");await loadBlockData()}catch(e){toast(`Falha ao desbloquear: ${e.message}`)} }
+async function setConsentUI(){ const ph=document.getElementById("cons-phone").value.trim(); const opt=document.getElementById("cons-opt").value; if(!ph) return toast("Informe o telefone"); try{await apiRequest("/api/consent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone:ph,opted_in:opt==="1"})});toast("Consentimento atualizado");await loadBlockData()}catch(e){toast(`Falha ao atualizar: ${e.message}`)} }
 function blockView(){
  loadBlockData();
  const T=TABS.find(x=>x.k===tab);
  const bl=blockData.blocklist||[];
- const list=bl.map(b=>`<div class="grp" style="margin-bottom:8px"><div class="gh"><b>${b.phone}</b><span class="tag r">bloqueado</span></div><div class="sub" style="padding:4px 0 0">${b.reason||"—"} · ${b.created_at||""}</div><div class="act" style="margin-top:8px"><button class="btn s" onclick="unblockPhone('${b.phone}')">Desbloquear</button></div></div>`).join("")||`<div class="empty">Nenhum contato bloqueado.</div>`;
+ const list=bl.map(b=>`<div class="grp" style="margin-bottom:8px"><div class="gh"><b>${esc(b.phone)}</b><span class="tag r">bloqueado</span></div><div class="sub" style="padding:4px 0 0">${esc(b.reason||"—")} · ${esc(b.created_at||"")}</div><div class="act" style="margin-top:8px"><button class="btn s" onclick="unblockPhone('${q(b.phone)}')">Desbloquear</button></div></div>`).join("")||`<div class="empty">Nenhum contato bloqueado.</div>`;
  return `<h1>Bloqueio e Consentimento</h1><p class="lead">${T.d}</p>
  <div class="two">
   <div>
@@ -419,10 +438,16 @@ function draw(){
  const ICONS={dash:"📊",offline:"⚠️",notificado:"🔔",analisando:"🔍",aguardando:"🛠️",validacao:"☑️",resolvido:"✅",whatsapp:"💬",templates:"📝",reports:"📈",botconfig:"⚙️",blocklist:"🚫"};
  $("#nav").innerHTML=TABS.map(t=>`<button data-k="${t.k}" class="${t.k===tab?"on":""}"><span>${ICONS[t.k]||""} ${t.t}</span>${t.k==="dash"?"":`<span class="n">${new Set(cams.filter(c=>c.status===t.k).map(c=>c.resp)).size}</span>`}</button>`).join("");
  const keep=document.activeElement&&document.activeElement.id,val=keep&&document.activeElement.value;
- $("#view").innerHTML=(loadError?`<div class="note">Não foi possível carregar as câmeras: ${esc(loadError)}</div>`:"")+view();
+ const storageNotice=storageMode==="memory"?'<div class="note">Armazenamento temporário em memória: configure o Postgres remoto para evitar perda de dados.</div>':"";
+ $("#view").innerHTML=(loadError?`<div class="note">Não foi possível carregar as câmeras: ${esc(loadError)}</div>`:"")+storageNotice+view();
  if(keep&&$("#"+CSS.escape(keep))){const e=$("#"+CSS.escape(keep));if(val!==undefined)e.value=val}
 }
-function go(k){tab=k;draw();if(k==="whatsapp"){loadConversations();loadWaStatus()}if(k==="templates")loadTemplates();if(k==="reports")loadReports();if(k==="botconfig")loadBotCfg()}
+function go(k){tab=k;history.replaceState(null,"","#"+k);draw();if(k==="whatsapp"){loadConversations();loadWaStatus()}if(k==="templates")loadTemplates();if(k==="reports")loadReports();if(k==="botconfig")loadBotCfg();if(k==="blocklist")loadBlockData()}
+function applyHash(){
+ const initial=(location.hash||"").replace("#","");
+ if(TABS.some(t=>t.k===initial)){tab=initial;draw();}
+}
+window.addEventListener("hashchange",applyHash);
 document.addEventListener("click",async e=>{
 const conversation=e.target.closest("[data-open-jid]");if(conversation)return loadMessages(conversation.dataset.openJid);
 const template=e.target.closest("[data-template-id]");if(template){tplActive=template.dataset.templateId;return draw()}
@@ -436,7 +461,11 @@ const removeTemplate=e.target.closest("[data-template-delete]");if(removeTemplat
   if(!pend.length||!r2||!p)return toast("Informe o responsável, o WhatsApp e ao menos uma câmera");
   const novos=pend.filter(i=>!cams.some(c=>c.id===i&&c.status!=="resolvido"));
   if(!novos.length)return toast("Essas câmeras já estão cadastradas");
-  try{for(const id of novos)await apiRequest("/api/cameras",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,camera_nome:id,local:"",responsavel_nome:r2,responsavel_telefone:p.replace(/\D/g,""),email:"",status:"Pendente",tentativas:0,ultima_cobranca:"",data_resolucao:"",observacoes:""})});toast(`${novos.length} câmera(s) cadastrada(s) para ${r2}`);pend=[];fv={r:"",p:""};await loadFromApi()}catch(error){toast(`Falha ao cadastrar: ${error.message}`)}return}
+  const digits=p.replace(/\D/g,"");
+  const numberCheck=await checkWaNumber(digits);
+  if(numberCheck.exists===false)return toast(`Numero ${digits} nao existe no WhatsApp. Confira o DDD antes de cadastrar.`);
+  if(numberCheck.exists===null)toast(`Nao foi possivel validar o numero no WhatsApp: ${numberCheck.error}. Continuando...`);
+  try{for(const id of novos)await apiRequest("/api/cameras",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,camera_nome:id,local:"",responsavel_nome:r2,responsavel_telefone:digits,email:"",status:"Pendente",tentativas:0,ultima_cobranca:"",data_resolucao:"",observacoes:""})});toast(`${novos.length} câmera(s) cadastrada(s) para ${r2}`);pend=[];fv={r:"",p:""};await loadFromApi()}catch(error){toast(`Falha ao cadastrar: ${error.message}`)}return}
  if(A[a])A[a](r)
 });
 document.addEventListener("keydown",e=>{if(e.target.id==="f-id"&&(e.key==="Enter"||e.key===",")){e.preventDefault();pushIds();focusId()}});
@@ -447,6 +476,11 @@ setInterval(()=>{if(tab==="whatsapp"&&(waState.status==="qr"||waState.status==="
 const initial=(location.hash||"").replace("#","");
 if(TABS.some(t=>t.k===initial))tab=initial;
 draw();
+if(tab==="whatsapp"){loadConversations();loadWaStatus()}
+if(tab==="templates")loadTemplates();
+if(tab==="reports")loadReports();
+if(tab==="botconfig")loadBotCfg();
+if(tab==="blocklist")loadBlockData();
 </script>
 </body>
 </html>

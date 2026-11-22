@@ -31,6 +31,12 @@ O servidor escuta apenas em `127.0.0.1` por padrão. Para aceitar conexões de o
 
 A conexão por QR usa Baileys/WhatsApp Web, não a API oficial Meta. É uma integração não oficial e pode desconectar ou deixar de funcionar após mudanças no WhatsApp. Para operação comercial crítica, prefira a API oficial da Meta.
 
+## Cadastro e avisos
+
+- Ao cadastrar um responsável, o painel consulta o WhatsApp e bloqueia números que não existem na plataforma. Se a consulta estiver indisponível, o cadastro prossegue com aviso.
+- O envio de avisos usa **opções clicáveis reais** no WhatsApp: **Em análise**, **Falar com técnico** e **Informei resolução**. Se o WhatsApp não aceitar os botões, o sistema envia texto com as opções `1`, `2` e `3`.
+- As respostas dos botões (ou os números digitados) atualizam o status automaticamente.
+
 ## Bots e consentimento
 
 - Os bots rodam de segunda a sexta-feira no fuso `America/Cuiaba`. Os horários, o limite de tentativas e o modo automático são configurados em **Config. Bots**.
@@ -54,6 +60,8 @@ Os JSONs em `workflows/` são fluxos antigos para a API oficial Meta e permanece
 | `POST` / `PUT` / `DELETE` | `/api/cameras` | Cadastro, atualização e remoção |
 | `GET` / `POST` | `/api/log` | Consulta e grava eventos |
 | `GET` / `POST` | `/api/whatsapp/status`, `/api/whatsapp/connect`, `/api/whatsapp/send` | Estado, conexão e envio pelo WhatsApp |
+| `POST` | `/api/whatsapp/send-options` | Envio com opções clicáveis (com retorno para texto) |
+| `GET` | `/api/whatsapp/check/:phone` | Verifica se o número existe no WhatsApp |
 | `GET` | `/api/whatsapp/conversations` | Conversas armazenadas |
 | `POST` | `/api/consent` | Registra ou remove autorização de mensagens |
 | `POST` | `/api/bots/billing/run`, `/api/bots/maintenance/run` | Execução manual dos bots |
@@ -66,14 +74,16 @@ Defina estas variáveis de ambiente no projeto da Vercel (o `.env` local não é
 
 - `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE` — o PostgreSQL precisa estar acessível pela rede; `127.0.0.1` não funciona na Vercel.
 - Não defina `API_KEY` neste deploy: o painel não envia o cabeçalho `x-api-key` e todas as chamadas retornariam 401. Proteja o acesso com a **Password Protection** da Vercel ou restrição de IP.
+- Para WhatsApp pela API oficial Meta: `META_WA_ACCESS_TOKEN` e `META_WA_PHONE_NUMBER_ID`.
+- Para usar uma conexão Baileys local por meio seguro: `WHATSAPP_BRIDGE_URL` e opcionalmente `WHATSAPP_BRIDGE_KEY`.
 
 **Sem Postgres remoto configurado**, o adaptador usa `db-memory.js`: o painel e as APIs respondem normalmente, mas os dados **não persistem** entre invocações/instâncias. O `/api/health` indica `"storage":"memory"`. Para persistência, configure as variáveis acima com um banco alcançável pela Vercel.
 
 ### Limitações do serverless
 
-A Vercel executa funções sob demanda, sem processo persistente e com sistema de arquivos somente leitura. Por isso, nestes endpoints a resposta é `501 UNSUPPORTED_ON_VERCEL`:
+A Vercel executa funções sob demanda, sem processo persistente e com sistema de arquivos somente leitura. Por isso, estes recursos ficam limitados:
 
-- Conexão/desconexão e envio pelo WhatsApp (Baileys precisa manter sessão e gravar `auth_info/`);
+- Conexão/desconexão pelo WhatsApp Baileys (a integração oficial Meta ou uma ponte HTTPS pode fornecer envio serverless);
 - Execução manual dos bots (depende da conexão WhatsApp);
 - Atualizações em tempo real via Socket.IO (WebSocket não é suportado nas funções; o painel continua funcionando via requisições HTTP, mas sem push automático).
 
