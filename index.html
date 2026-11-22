@@ -407,7 +407,7 @@ function dash(){
 function pushIds(){const e=$("#f-id");if(!e)return;e.value.split(/[,;\s]+/).map(x=>x.trim().toUpperCase()).filter(Boolean).forEach(i=>{if(!pend.includes(i))pend.push(i)});e.value="";draw()}
 function focusId(){const e=$("#f-id");if(e)e.focus()}
 function draw(){
- const ICONS={dash:"📊",offline:"⚠️",notificado:"🔔",analisando:"🔍",aguardando:"🛠️",validacao:"☑️",resolvido:"✅",whatsapp:"💬",templates:"📝",reports:"📈",botconfig:"??",blocklist:"?"};
+ const ICONS={dash:"📊",offline:"⚠️",notificado:"🔔",analisando:"🔍",aguardando:"🛠️",validacao:"☑️",resolvido:"✅",whatsapp:"💬",templates:"📝",reports:"📈",botconfig:"⚙️",blocklist:"🚫"};
  $("#nav").innerHTML=TABS.map(t=>`<button data-k="${t.k}" class="${t.k===tab?"on":""}"><span>${ICONS[t.k]||""} ${t.t}</span>${t.k==="dash"?"":`<span class="n">${new Set(cams.filter(c=>c.status===t.k).map(c=>c.resp)).size}</span>`}</button>`).join("");
  const keep=document.activeElement&&document.activeElement.id,val=keep&&document.activeElement.value;
  $("#view").innerHTML=(loadError?`<div class="note">Não foi possível carregar as câmeras: ${esc(loadError)}</div>`:"")+view();
