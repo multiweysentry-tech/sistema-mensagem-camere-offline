@@ -203,14 +203,32 @@ async function disconnect() {
   emitStatus();
 }
 
+function normalizeDestination(to) {
+  const destination = String(to || '');
+  const raw = (destination.includes('@') ? destination.split('@')[0] : destination).replace(/\D/g, '');
+  // Numeros brasileiros de 10/11 digitos precisam do codigo do pais para serem entregues.
+  const digits = /^\d{10,11}$/.test(raw) && !raw.startsWith('55') ? `55${raw}` : raw;
+  return /^\d{10,15}$/.test(digits) ? digits : null;
+}
+
+async function checkNumber(to) {
+  if (!sock || connectionStatus !== 'open') throw new Error('WhatsApp nao conectado');
+  const digits = normalizeDestination(to);
+  if (!digits) throw new Error('Telefone de destino invalido');
+  const results = await sock.onWhatsApp(digits) || [];
+  const found = results.find(entry => entry?.exists && String(entry.jid || '').startsWith(digits));
+  return {
+    phone: digits,
+    exists: Boolean(found),
+    jid: found?.jid || `${digits}@s.whatsapp.net`
+  };
+}
+
 async function sendMessage(to, text) {
   if (!sock || connectionStatus !== 'open') throw new Error('WhatsApp nao conectado');
-  const destination = String(to || '');
-  const digits = destination.replace(/\D/g, '');
-  const jid = destination.endsWith('@s.whatsapp.net')
-    ? destination
-    : /^\d{10,15}$/.test(digits) ? `${digits}@s.whatsapp.net` : '';
-  if (!jid) throw new Error('Telefone de destino invalido');
+  const digits = normalizeDestination(to);
+  if (!digits) throw new Error('Telefone de destino invalido');
+  const jid = `${digits}@s.whatsapp.net`;
   if (typeof text !== 'string' || !text.trim() || text.length > 4096) {
     throw new Error('Mensagem invalida (limite de 4096 caracteres)');
   }
@@ -240,4 +258,4 @@ async function sendMessage(to, text) {
   return { ok: true, id: entry.id };
 }
 
-module.exports = { connect, disconnect, getStatus, sendMessage, setIO };
+module.exports = { connect, disconnect, getStatus, sendMessage, checkNumber, setIO };

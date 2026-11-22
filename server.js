@@ -104,6 +104,7 @@ function createApp(options = {}) {
       '/api/bots/billing/run',
       '/api/bots/maintenance/run'
     ]) app.post(route, unsupported);
+    app.get('/api/whatsapp/check/:phone', unsupported);
   }
 
   app.get('/api/health', async (req, res) => {
@@ -262,6 +263,17 @@ function createApp(options = {}) {
       return res.json(result);
     } catch (error) {
       return res.status(503).json({ codigo: 'WHATSAPP_SEND_FAILED', erro: error.message });
+    }
+  });
+  app.get('/api/whatsapp/check/:phone', async (req, res) => {
+    const phone = String(req.params.phone || '').replace(/\D/g, '');
+    if (!/^\d{10,15}$/.test(phone)) {
+      return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Telefone invalido' });
+    }
+    try {
+      return res.json(await wa.checkNumber(phone));
+    } catch (error) {
+      return res.status(503).json({ codigo: 'WHATSAPP_CHECK_FAILED', erro: error.message });
     }
   });
   app.get('/api/whatsapp/conversations', async (req, res) => {
