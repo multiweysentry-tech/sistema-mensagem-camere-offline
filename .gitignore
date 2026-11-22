@@ -1,4 +1,5 @@
 node_modules/
+.agents/
 auth_info/
 data.json
 *.log
