@@ -14,3 +14,4 @@ test_db.js
 test_out.txt
 exec.log
 *.txt
+.vercel

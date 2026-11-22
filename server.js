@@ -109,7 +109,9 @@ function createApp(options = {}) {
   app.get('/api/health', async (req, res) => {
     try {
       const cameras = await db.getCameras();
-      res.json({ status: 'ok', cameras: cameras.length });
+      const body = { status: 'ok', cameras: cameras.length };
+      if (db.mode) body.storage = db.mode;
+      res.json(body);
     } catch (error) {
       res.status(500).json({ status: 'error', erro: error.message });
     }
