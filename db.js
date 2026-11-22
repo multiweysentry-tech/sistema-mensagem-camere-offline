@@ -8,6 +8,9 @@ const pool = new Pool({
   database: process.env.PG_DATABASE || 'n8n',
   // Cada instancia serverless deve manter no maximo uma conexao com o banco.
   max: process.env.VERCEL ? 1 : 10,
+  // Evita que uma conexao inalcancavel consuma todo o tempo limite da funcao.
+  connectionTimeoutMillis: 5000,
+  idleTimeoutMillis: 10000,
 });
 
 async function init() {

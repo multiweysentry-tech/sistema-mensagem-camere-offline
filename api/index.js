@@ -1,15 +1,27 @@
 // Ponto de entrada serverless para o Vercel.
 // O servidor local continua sendo `npm start` (server.js).
-const { createApp } = require('../server');
-const db = require('../db');
-const wa = require('../whatsapp');
-const bots = require('../bots');
+let createApp;
+let db;
+let wa;
+let bots;
+let loadError = null;
+
+try {
+  ({ createApp } = require('../server'));
+  db = require('../db');
+  wa = require('../whatsapp');
+  bots = require('../bots');
+} catch (error) {
+  // Captura falhas de importacao para nao virar um FUNCTION_INVOCATION_FAILED opaco.
+  loadError = error;
+}
 
 let appPromise = null;
 
 async function getApp() {
   if (!appPromise) {
     appPromise = (async () => {
+      if (loadError) throw loadError;
       await db.init();
       // No Vercel nao iniciamos agendadores nem conexao WhatsApp:
       // sao processos de longa duracao e exigem sistema de arquivos gravavel.
@@ -33,7 +45,7 @@ module.exports = async function handler(req, res) {
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.end(JSON.stringify({
         codigo: 'INIT_ERROR',
-        erro: error.message,
+        erro: error.message || String(error),
         dica: 'Configure PG_HOST, PG_PORT, PG_USER, PG_PASSWORD e PG_DATABASE nas variaveis de ambiente da Vercel.'
       }));
     }
