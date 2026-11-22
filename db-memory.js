@@ -130,6 +130,12 @@ async function setConsent(phone, optedIn) {
   state.consent.set(phone, { phone, opted_in: optedIn ? 1 : 0, updated_at: new Date().toISOString() });
 }
 
+async function ensureConsent(phone) {
+  if (state.consent.has(phone) || state.blocklist.has(phone)) return false;
+  await setConsent(phone, true);
+  return true;
+}
+
 async function block(phone, reason) {
   if (!state.blocklist.has(phone)) state.blocklist.set(phone, { phone, reason: reason || '', created_at: new Date().toISOString() });
 }
@@ -233,6 +239,7 @@ module.exports = {
   hasConsent,
   getConsents,
   setConsent,
+  ensureConsent,
   block,
   unblock,
   getBlocklist,

@@ -3,6 +3,15 @@ const { test } = require('node:test');
 const { createApp } = require('./server');
 const { createBots, parseReply, localHour } = require('./bots');
 const { extrairDDD } = require('./phone-utils');
+const { generateWAMessageFromContent, proto } = require('@whiskeysockets/baileys');
+const {
+  findExistingNumber,
+  textFromMessage,
+  createInteractiveMessage,
+  resolveDirectPhoneJid,
+  waitForDeliveryAck,
+  handleDeliveryStatus
+} = require('./whatsapp');
 
 function createMemoryDb(initialCameras = []) {
   const cameras = structuredClone(initialCameras);
@@ -76,6 +85,11 @@ function createMemoryDb(initialCameras = []) {
       return [...consent.entries()].map(([phone, opted_in]) => ({ phone, opted_in }));
     },
     async setConsent(phone, optedIn) { consent.set(phone, optedIn); },
+    async ensureConsent(phone) {
+      if (consent.has(phone) || blocklist.has(phone)) return false;
+      consent.set(phone, true);
+      return true;
+    },
     async block(phone, reason) { blocklist.set(phone, reason); },
     async unblock(phone) { blocklist.delete(phone); },
     async getTemplates() { return [...templates.values()]; },
@@ -234,6 +248,33 @@ test('POST camera remains an upsert and normalizes phone numbers', async t => {
   assert.equal(upsert.body.camera.observacoes, 'Atualizada');
 });
 
+test('camera registration records consent but preserves an existing opt-out', async t => {
+  const { baseUrl, db } = await startServer(t);
+  const create = await jsonRequest(baseUrl, '/api/cameras', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(camera)
+  });
+  assert.equal(create.response.status, 201);
+  assert.equal(await db.hasConsent(camera.responsavel_telefone), true);
+
+  const optOut = await jsonRequest(baseUrl, '/api/consent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone: camera.responsavel_telefone, opted_in: false })
+  });
+  assert.equal(optOut.response.status, 200);
+
+  const secondCamera = await jsonRequest(baseUrl, '/api/cameras', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...camera, id: 'CAM-9002' })
+  });
+  assert.equal(secondCamera.response.status, 201);
+  assert.equal(await db.hasConsent(camera.responsavel_telefone), false);
+  assert.equal(await db.isBlocked(camera.responsavel_telefone), true);
+});
+
 test('WhatsApp endpoints report connection failures and validate outbound messages', async t => {
   const { baseUrl, wa } = await startServer(t);
   const status = await jsonRequest(baseUrl, '/api/whatsapp/status');
@@ -263,6 +304,76 @@ test('WhatsApp endpoints report connection failures and validate outbound messag
     body: JSON.stringify({ to: '12', text: 'Aviso' })
   });
   assert.equal(invalid.response.status, 400);
+
+  const missingConsent = await jsonRequest(baseUrl, '/api/whatsapp/send-options', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: camera.responsavel_telefone, text: 'Aviso' })
+  });
+  assert.equal(missingConsent.response.status, 403);
+  assert.equal(missingConsent.body.codigo, 'CONSENT_REQUIRED');
+  assert.equal(wa.sent.length, 1);
+});
+
+test('opções clicáveis também respeitam bloqueio mesmo se houver consentimento registrado', async t => {
+  const { baseUrl, db, wa } = await startServer(t);
+  await db.setConsent(camera.responsavel_telefone, true);
+  await db.block(camera.responsavel_telefone, 'Opt-out');
+
+  const response = await jsonRequest(baseUrl, '/api/whatsapp/send-options', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: camera.responsavel_telefone, text: 'Aviso' })
+  });
+  assert.equal(response.response.status, 403);
+  assert.equal(response.body.codigo, 'CONTACT_BLOCKED');
+  assert.equal(wa.sent.length, 0);
+});
+
+test('send-options reports accepted but unconfirmed delivery without treating it as success', async t => {
+  const { baseUrl, db, wa } = await startServer(t);
+  await db.setConsent(camera.responsavel_telefone, true);
+  wa.sendWithOptions = async () => ({ ok: true, id: 'unconfirmed-id', deliveryStatus: 'unconfirmed' });
+
+  const result = await jsonRequest(baseUrl, '/api/whatsapp/send-options', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: camera.responsavel_telefone, text: 'Aviso' })
+  });
+  assert.equal(result.response.status, 202);
+  assert.equal(result.body.deliveryStatus, 'unconfirmed');
+  assert.equal(result.body.id, 'unconfirmed-id');
+});
+
+test('send-options prevents concurrent duplicate sends to the same contact', async t => {
+  const { baseUrl, db, wa } = await startServer(t);
+  await db.setConsent(camera.responsavel_telefone, true);
+  let releaseSend;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let sendCount = 0;
+  wa.sendWithOptions = () => {
+    sendCount++;
+    markStarted();
+    return new Promise(resolve => { releaseSend = resolve; });
+  };
+  const request = () => jsonRequest(baseUrl, '/api/whatsapp/send-options', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: camera.responsavel_telefone, text: 'Aviso' })
+  });
+
+  const firstRequest = request();
+  await started;
+  const duplicate = await request();
+  assert.equal(duplicate.response.status, 409);
+  assert.equal(duplicate.body.codigo, 'WHATSAPP_SEND_IN_PROGRESS');
+  assert.equal(sendCount, 1);
+
+  releaseSend({ ok: true, id: 'first-send', deliveryStatus: 'unconfirmed' });
+  const first = await firstRequest;
+  assert.equal(first.response.status, 202);
+  assert.equal(first.body.id, 'first-send');
 });
 
 test('consent requires an explicit boolean and opt-out adds the number to the blocklist', async t => {
@@ -344,6 +455,67 @@ test('billing bot groups cameras, requires consent, deduplicates sends, and resp
   assert.match(wa.sent[1].text, /nao recebera mais/);
 });
 
+test('billing bot pauses retries for 24 hours after an unconfirmed send', async t => {
+  const { db } = await startServer(t, [camera]);
+  await db.setConsent(camera.responsavel_telefone, true);
+  const failingWa = { async sendWithOptions() { throw new Error('delivery not confirmed'); } };
+  const bots = createBots({
+    db,
+    wa: failingWa,
+    schedulerApi: { schedule: () => ({ stop() {} }) }
+  });
+  const now = new Date();
+
+  const first = await bots.runBillingBot({ now, force: true });
+  assert.deepEqual(first, { sent: 0, failed: 1, unconfirmed: 0 });
+  const retry = await bots.runBillingBot({ now: new Date(now.getTime() + 60 * 60 * 1000), force: true });
+  assert.deepEqual(retry, { sent: 0, failed: 0, unconfirmed: 0 });
+  assert.equal(db.logs.filter(entry => entry.acao === 'ERRO').length, 1);
+});
+
+test('billing bot keeps accepted but unconfirmed messages out of delivered status and deduplicates', async t => {
+  const { db, wa } = await startServer(t, [camera]);
+  await db.setConsent(camera.responsavel_telefone, true);
+  let sendCount = 0;
+  wa.sendWithOptions = async () => {
+    sendCount++;
+    return { ok: true, id: 'unconfirmed-id', deliveryStatus: 'unconfirmed' };
+  };
+  const bots = createBots({
+    db,
+    wa,
+    schedulerApi: { schedule: () => ({ stop() {} }) }
+  });
+  const now = new Date();
+
+  const result = await bots.runBillingBot({ now, force: true });
+  assert.deepEqual(result, { sent: 0, failed: 0, unconfirmed: 1 });
+  const [updated] = await db.getCameras();
+  assert.equal(updated.status, 'Pendente');
+  assert.equal(updated.tentativas, 1);
+  assert.equal(updated.ultima_cobranca, now.toISOString());
+  assert.equal(db.logs[0].acao, 'ENVIO_SEM_CONFIRMACAO');
+
+  const retry = await bots.runBillingBot({ now: new Date(now.getTime() + 60 * 60 * 1000), force: true });
+  assert.deepEqual(retry, { sent: 0, failed: 0, unconfirmed: 0 });
+  assert.equal(sendCount, 1);
+});
+
+test('billing bot deduplicates from camera timestamp when its send log is missing', async t => {
+  const { db, wa, bots } = await startServer(t, [{
+    ...camera,
+    status: 'Aguardando resposta',
+    tentativas: 1,
+    ultima_cobranca: new Date().toISOString()
+  }]);
+  await db.setConsent(camera.responsavel_telefone, true);
+  await wa.connect();
+
+  const result = await bots.runBillingBot({ now: new Date(), force: true });
+  assert.deepEqual(result, { sent: 0, failed: 0, unconfirmed: 0 });
+  assert.equal(wa.sent.length, 0);
+});
+
 test('incoming WhatsApp choices update only matching cameras and parse common replies', async t => {
   const { db, wa, bots } = await startServer(t, [camera]);
   await wa.connect();
@@ -369,6 +541,48 @@ test('manual bots ignore automatic mode and can run outside business hours', asy
   });
   assert.equal(billing.response.status, 200);
   assert.equal(billing.body.result.sent, 1);
+});
+
+test('temporary business hours allow sends only on the configured date through midnight', async t => {
+  const { db, wa, bots } = await startServer(t, [camera]);
+  await db.setConsent(camera.responsavel_telefone, true);
+  await wa.connect();
+  await db.setBotConfig('business_hours_override_date', '2026-11-22');
+  await db.setBotConfig('business_hours_override_start', '18');
+  await db.setBotConfig('business_hours_override_end', '24');
+
+  const withinWindow = await bots.runBillingBot({ now: new Date('2026-11-22T22:00:00.000Z') });
+  assert.equal(withinWindow.sent, 1);
+
+  const atMidnight = await bots.runBillingBot({ now: new Date('2026-11-23T04:00:00.000Z') });
+  assert.equal(atMidnight.skipped, 'outside business hours');
+});
+
+test('temporary business-hours configuration accepts midnight and rejects invalid intervals', async t => {
+  const { baseUrl } = await startServer(t);
+  const settings = {
+    business_hours_override_date: '2026-11-22',
+    business_hours_override_start: '18',
+    business_hours_override_end: '24'
+  };
+  const saved = await jsonRequest(baseUrl, '/api/bots/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings)
+  });
+  assert.equal(saved.response.status, 200);
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(await (await jsonRequest(baseUrl, '/api/bots/config')).body)
+      .filter(([key]) => key.startsWith('business_hours_override_'))),
+    settings
+  );
+
+  const invalid = await jsonRequest(baseUrl, '/api/bots/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...settings, business_hours_override_end: '25' })
+  });
+  assert.equal(invalid.response.status, 400);
 });
 
 test('partial camera updates and template writes reject invalid required fields', async t => {
@@ -422,4 +636,77 @@ test('DDD invalido e rejeitado no cadastro e na consulta do WhatsApp', async t =
   const validCheck = await jsonRequest(baseUrl, '/api/whatsapp/check/556581367063');
   assert.equal(validCheck.response.status, 200);
   assert.equal(validCheck.body.exists, true);
+});
+
+test('WhatsApp reconhece número existente quando o JID retornado é LID', () => {
+  const result = findExistingNumber([{ jid: '123456789@lid', exists: true }]);
+  assert.equal(result.jid, '123456789@lid');
+});
+
+test('respostas recebidas por LID são associadas ao JID de telefone, não ao ID LID', async () => {
+  assert.equal(
+    await resolveDirectPhoneJid({
+      remoteJid: '123456789@lid',
+      remoteJidAlt: '5511999990003@s.whatsapp.net'
+    }),
+    '5511999990003@s.whatsapp.net'
+  );
+  assert.equal(
+    await resolveDirectPhoneJid(
+      { remoteJid: '123456789@lid' },
+      { getPNForLID: async () => '5511999990003@s.whatsapp.net' }
+    ),
+    '5511999990003@s.whatsapp.net'
+  );
+  assert.equal(await resolveDirectPhoneJid({ remoteJid: '123456789@lid' }), null);
+});
+
+test('notificação gera opções clicáveis para o cliente e interpreta a resposta selecionada', () => {
+  const message = createInteractiveMessage('Como prefere prosseguir?', [
+    { id: '1', text: 'Estou verificando' },
+    { id: '2', text: 'Preciso de suporte' },
+    { id: '3', text: 'Já resolvi' }
+  ]);
+  const generated = generateWAMessageFromContent(
+    '123456789@s.whatsapp.net',
+    message,
+    { userJid: '987654321@s.whatsapp.net' }
+  );
+  assert.ok(generated.key.id);
+  const interactive = generated.message.interactiveMessage;
+  assert.equal(generated.message.viewOnceMessage, null);
+  assert.equal(interactive.nativeFlowMessage.messageVersion, 3);
+  assert.ok(interactive.nativeFlowMessage.messageParamsJson);
+  const buttons = interactive.nativeFlowMessage.buttons.map(button => JSON.parse(button.buttonParamsJson));
+  assert.deepEqual(buttons, [
+    { display_text: 'Estou verificando', id: '1' },
+    { display_text: 'Preciso de suporte', id: '2' },
+    { display_text: 'Já resolvi', id: '3' }
+  ]);
+
+  const reply = textFromMessage({
+    interactiveResponseMessage: {
+      nativeFlowResponseMessage: { paramsJson: JSON.stringify({ id: '2', display_text: 'Preciso de suporte' }) }
+    }
+  });
+  assert.equal(parseReply(reply).intent, 'support');
+});
+
+test('envio interativo só confirma após ACK de entrega, não apenas ACK do servidor', async () => {
+  const messageId = 'delivery-ack-test';
+  const delivery = waitForDeliveryAck(messageId, 1000);
+  let settled = false;
+  delivery.promise.then(() => { settled = true; }, () => { settled = true; });
+
+  handleDeliveryStatus(messageId, proto.WebMessageInfo.Status.SERVER_ACK);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false);
+
+  handleDeliveryStatus(messageId, proto.WebMessageInfo.Status.DELIVERY_ACK);
+  assert.equal(await delivery.promise, proto.WebMessageInfo.Status.DELIVERY_ACK);
+
+  const timeout = waitForDeliveryAck('delivery-ack-timeout', 5);
+  await assert.rejects(timeout.promise, error =>
+    error.code === 'DELIVERY_UNCONFIRMED' && /nao confirmou a entrega/.test(error.message)
+  );
 });

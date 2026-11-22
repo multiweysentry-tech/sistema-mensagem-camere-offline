@@ -17,9 +17,20 @@ function localHour(date = new Date()) {
   }).format(date));
 }
 
-function parseHour(value, fallback) {
+function localDate(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+  const part = type => parts.find(item => item.type === type)?.value;
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+function parseHour(value, fallback, maximum = 23) {
   const hour = Number(value);
-  return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : fallback;
+  return Number.isInteger(hour) && hour >= 0 && hour <= maximum ? hour : fallback;
 }
 
 function normalizeText(text) {
@@ -68,12 +79,17 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron } = {}
       ...config,
       maxAttempts: Math.max(1, Number.parseInt(config.max_attempts, 10) || 3),
       businessStart: parseHour(config.business_hours_start, 8),
-      businessEnd: parseHour(config.business_hours_end, 18)
+      businessEnd: parseHour(config.business_hours_end, 18),
+      overrideStart: parseHour(config.business_hours_override_start, 0),
+      overrideEnd: parseHour(config.business_hours_override_end, 24, 24)
     };
   }
 
   function isBusinessHours(config, now = new Date()) {
     const hour = localHour(now);
+    if (config.business_hours_override_date === localDate(now)) {
+      return hour >= config.overrideStart && hour < config.overrideEnd;
+    }
     return hour >= config.businessStart && hour < config.businessEnd;
   }
 
@@ -90,6 +106,14 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron } = {}
     return entries.some(entry => actions.includes(entry.acao) &&
       normalizePhone(entry.responsavel_telefone) === phone &&
       Date.parse(entry.timestamp) >= threshold.getTime());
+  }
+
+  function hasRecentCameraNotice(cameras, now) {
+    const cutoff = now.getTime() - 24 * 60 * 60 * 1000;
+    return cameras.some(camera => {
+      const timestamp = Date.parse(camera.ultima_cobranca || '');
+      return Number.isFinite(timestamp) && timestamp >= cutoff && timestamp <= now.getTime();
+    });
   }
 
   function groupByPhone(cameras) {
@@ -121,21 +145,43 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron } = {}
     });
     let sent = 0;
     let failed = 0;
+    let unconfirmed = 0;
 
     for (const group of groupByPhone(eligible)) {
       if (campaignsInProgress.has(group.phone)) continue;
       campaignsInProgress.add(group.phone);
       try {
         if (!(await canSendCampaign(group.phone))) continue;
-        if (await hasRecentSend(group.phone, ['COBRANCA_ENVIADA', 'LEMBRETE_MANUTENCAO'], new Date(now.getTime() - 24 * 60 * 60 * 1000))) continue;
+        if (hasRecentCameraNotice(group.cameras, now)) continue;
+        if (await hasRecentSend(group.phone, ['COBRANCA_ENVIADA', 'LEMBRETE_MANUTENCAO', 'ENVIO_SEM_CONFIRMACAO', 'ERRO'], new Date(now.getTime() - 24 * 60 * 60 * 1000))) continue;
 
         const attempts = Math.max(...group.cameras.map(camera => Number(camera.tentativas) || 0)) + 1;
         const cameraList = group.cameras.map(camera => `• ${camera.camera_nome || camera.id}`).join('\n');
-        const message = `Olá, ${group.name}!\nO Sentry identificou que estas câmeras estão offline:\n${cameraList}\n\nEscolha uma das opções abaixo para atualizar o status.`;
+        const message = `Olá, ${group.name}!\nO Sentry identificou que estas câmeras estão offline:\n${cameraList}\n\nComo prefere prosseguir? Toque em uma opção abaixo para atualizar o status.`;
 
         try {
-          await wa.sendWithOptions(group.phone, message);
+          const result = await wa.sendWithOptions(group.phone, message);
           const timestamp = now.toISOString();
+          if (result?.deliveryStatus === 'unconfirmed') {
+            await db.addLog({
+              timestamp,
+              camera_id: group.cameras.map(camera => camera.id).join(','),
+              camera_nome: group.cameras.map(camera => camera.camera_nome).join(', '),
+              responsavel_telefone: group.phone,
+              acao: 'ENVIO_SEM_CONFIRMACAO',
+              detalhe: `WhatsApp aceitou o envio, mas nao confirmou a entrega; tentativa ${attempts}`,
+              status_anterior: group.cameras.map(camera => camera.status).join(','),
+              status_novo: group.cameras.map(camera => camera.status).join(',')
+            });
+            for (const camera of group.cameras) {
+              await db.updateCamera(camera.id, {
+                tentativas: (Number(camera.tentativas) || 0) + 1,
+                ultima_cobranca: timestamp
+              });
+            }
+            unconfirmed++;
+            continue;
+          }
           await db.addLog({
             timestamp,
             camera_id: group.cameras.map(camera => camera.id).join(','),
@@ -172,7 +218,7 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron } = {}
         campaignsInProgress.delete(group.phone);
       }
     }
-    return { sent, failed };
+    return { sent, failed, unconfirmed };
   }
 
   async function runMaintenanceBot({ now = new Date(), force = false } = {}) {
@@ -184,15 +230,30 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron } = {}
     const groups = groupByPhone(cameras.filter(camera => String(camera.status || '').trim() === 'Pendente'));
     let sent = 0;
     let failed = 0;
+    let unconfirmed = 0;
     for (const group of groups) {
       if (campaignsInProgress.has(group.phone)) continue;
       campaignsInProgress.add(group.phone);
       try {
         if (!(await canSendCampaign(group.phone))) continue;
-        if (await hasRecentSend(group.phone, ['COBRANCA_ENVIADA', 'LEMBRETE_MANUTENCAO'], new Date(now.getTime() - 24 * 60 * 60 * 1000))) continue;
+        if (await hasRecentSend(group.phone, ['COBRANCA_ENVIADA', 'LEMBRETE_MANUTENCAO', 'ENVIO_SEM_CONFIRMACAO', 'ERRO'], new Date(now.getTime() - 24 * 60 * 60 * 1000))) continue;
         const cameraList = group.cameras.map(camera => `• ${camera.camera_nome || camera.id}${camera.local ? ` (${camera.local})` : ''}`).join('\n');
         try {
-          await wa.sendWithOptions(group.phone, `Lembrete do Sentry: estas câmeras estão offline:\n${cameraList}\nPor favor, verifique e escolha uma das opções abaixo.`);
+          const result = await wa.sendWithOptions(group.phone, `Lembrete do Sentry: estas câmeras estão offline:\n${cameraList}\nComo prefere prosseguir? Toque em uma opção abaixo para atualizar o status.`);
+          if (result?.deliveryStatus === 'unconfirmed') {
+            await db.addLog({
+              timestamp: now.toISOString(),
+              camera_id: group.cameras.map(camera => camera.id).join(','),
+              camera_nome: group.cameras.map(camera => camera.camera_nome).join(', '),
+              responsavel_telefone: group.phone,
+              acao: 'ENVIO_SEM_CONFIRMACAO',
+              detalhe: 'WhatsApp aceitou o lembrete, mas nao confirmou a entrega',
+              status_anterior: 'Pendente',
+              status_novo: 'Pendente'
+            });
+            unconfirmed++;
+            continue;
+          }
           await db.addLog({
             timestamp: now.toISOString(),
             camera_id: group.cameras.map(camera => camera.id).join(','),
@@ -222,7 +283,7 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron } = {}
         campaignsInProgress.delete(group.phone);
       }
     }
-    return { sent, failed };
+    return { sent, failed, unconfirmed };
   }
 
   async function onIncomingMessage(jid, text) {

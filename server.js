@@ -74,6 +74,7 @@ function createApp(options = {}) {
   const wa = options.wa || require('./whatsapp');
   const bots = options.bots || require('./bots');
   const app = express();
+  const whatsappSendsInProgress = new Set();
   const server = http.createServer(app);
   const io = new Server(server);
 
@@ -158,6 +159,7 @@ function createApp(options = {}) {
         data_resolucao: req.body.data_resolucao || '',
         observacoes: req.body.observacoes || ''
       });
+      await db.ensureConsent(normalizePhone(req.body.responsavel_telefone));
       const camera = (await db.getCameras()).find(item => String(item.id) === normalizedId);
       return res.status(exists ? 200 : 201).json({ camera });
     } catch (error) {
@@ -269,11 +271,31 @@ function createApp(options = {}) {
     if (buttons !== undefined && (!Array.isArray(buttons) || buttons.length < 2 || buttons.length > 3)) {
       return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe de 2 a 3 botoes' });
     }
+    const phone = normalizePhone(to);
+    try {
+      if (await db.isBlocked(phone)) {
+        return res.status(403).json({ codigo: 'CONTACT_BLOCKED', erro: 'Contato bloqueado para mensagens' });
+      }
+      if (!(await db.hasConsent(phone))) {
+        return res.status(403).json({ codigo: 'CONSENT_REQUIRED', erro: 'Contato sem consentimento registrado' });
+      }
+    } catch (error) {
+      return res.status(500).json({ codigo: 'CONSENT_CHECK_FAILED', erro: error.message });
+    }
+    if (whatsappSendsInProgress.has(phone)) {
+      return res.status(409).json({
+        codigo: 'WHATSAPP_SEND_IN_PROGRESS',
+        erro: 'Ja existe um envio em andamento para este contato'
+      });
+    }
+    whatsappSendsInProgress.add(phone);
     try {
       const result = await wa.sendWithOptions(String(to), text.trim(), buttons, footer);
-      return res.json(result);
+      return res.status(result.deliveryStatus === 'unconfirmed' ? 202 : 200).json(result);
     } catch (error) {
       return res.status(503).json({ codigo: 'WHATSAPP_SEND_FAILED', erro: error.message });
+    } finally {
+      whatsappSendsInProgress.delete(phone);
     }
   });
   app.get('/api/whatsapp/check/:phone', async (req, res) => {
@@ -492,7 +514,10 @@ function createApp(options = {}) {
       'auto_mode',
       'max_attempts',
       'business_hours_start',
-      'business_hours_end'
+      'business_hours_end',
+      'business_hours_override_date',
+      'business_hours_override_start',
+      'business_hours_override_end'
     ]);
     const entries = Object.entries(req.body || {});
     if (!entries.length || entries.some(([key, value]) => !allowed.has(key) || typeof value !== 'string')) {
@@ -502,6 +527,20 @@ function createApp(options = {}) {
       if (['billing_hour', 'maintenance_hour', 'business_hours_start', 'business_hours_end'].includes(key) &&
           (!/^\d{1,2}$/.test(value) || Number(value) < 0 || Number(value) > 23)) {
         return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: `${key} deve ser uma hora entre 0 e 23` });
+      }
+      if (key === 'business_hours_override_date' && value &&
+          (!/^\d{4}-\d{2}-\d{2}$/.test(value) ||
+           !Number.isFinite(Date.parse(`${value}T00:00:00.000Z`)) ||
+           new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) !== value)) {
+        return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'business_hours_override_date deve ser uma data valida (AAAA-MM-DD)' });
+      }
+      if (key === 'business_hours_override_start' &&
+          (!/^\d{1,2}$/.test(value) || Number(value) < 0 || Number(value) > 23)) {
+        return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'business_hours_override_start deve ser uma hora entre 0 e 23' });
+      }
+      if (key === 'business_hours_override_end' &&
+          (!/^\d{1,2}$/.test(value) || Number(value) < 1 || Number(value) > 24)) {
+        return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'business_hours_override_end deve ser uma hora entre 1 e 24' });
       }
       if (key === 'max_attempts' && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 100)) {
         return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'max_attempts deve ficar entre 1 e 100' });
@@ -518,6 +557,15 @@ function createApp(options = {}) {
       const proposed = { ...config, ...Object.fromEntries(entries) };
       if (Number(proposed.business_hours_start) >= Number(proposed.business_hours_end)) {
         return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'O fim do horario comercial deve ser posterior ao inicio' });
+      }
+      if (proposed.business_hours_override_date) {
+        const overrideStart = Number(proposed.business_hours_override_start);
+        const overrideEnd = Number(proposed.business_hours_override_end);
+        if (!Number.isInteger(overrideStart) || !Number.isInteger(overrideEnd) ||
+            overrideStart < 0 || overrideStart > 23 || overrideEnd < 1 ||
+            overrideEnd > 24 || overrideStart >= overrideEnd) {
+          return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe um intervalo temporario valido para a data selecionada' });
+        }
       }
       for (const [key, value] of entries) await db.setBotConfig(key, value);
       return res.json({ ok: true });

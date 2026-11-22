@@ -3,13 +3,14 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  generateMessageIDV2,
+  generateWAMessageFromContent,
   proto
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const { randomBytes } = require('crypto');
 
 const AUTH_DIR = path.join(__dirname, 'auth_info');
 const logger = pino({ level: 'silent' });
@@ -25,15 +26,17 @@ let connectionPromise = null;
 let reconnectTimer = null;
 let manuallyDisconnected = false;
 let socketGeneration = 0;
+const deliveryWaiters = new Map();
+const deliveryAckStatus = proto.WebMessageInfo.Status.DELIVERY_ACK;
+const errorStatus = proto.WebMessageInfo.Status.ERROR;
 
 // Os IDs precisam ser entendidos tambem pelo parseReply() dos bots.
 const OPTION_BUTTONS = [
-  { id: '1', text: 'Em análise' },
-  { id: '2', text: 'Falar com técnico' },
-  { id: '3', text: 'Informei resolução' }
+  { id: '1', text: 'Estou verificando' },
+  { id: '2', text: 'Preciso de suporte' },
+  { id: '3', text: 'Já resolvi' }
 ];
 const OPTION_FOOTER = 'Escolha uma opção. PARAR encerra as mensagens.';
-const OPTION_FALLBACK_TEXT = '\n\nResponda 1 para estou verificando, 2 para suporte ou 3 para já resolvi.';
 
 function setIO(ioInstance) {
   io = ioInstance;
@@ -80,6 +83,74 @@ function textFromMessage(message = {}) {
     content.imageMessage?.caption ||
     content.videoMessage?.caption ||
     '';
+}
+
+function waitForDeliveryAck(messageId, timeoutMs = 12000) {
+  let settle;
+  let settled = false;
+  let timer;
+  const promise = new Promise((resolve, reject) => {
+    settle = (error, status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      deliveryWaiters.delete(messageId);
+      if (error) reject(error);
+      else resolve(status);
+    };
+    deliveryWaiters.set(messageId, status => {
+      if (status === errorStatus) settle(new Error('WhatsApp rejeitou a mensagem'));
+      else if (status >= deliveryAckStatus) settle(null, status);
+    });
+    timer = setTimeout(() => {
+      const error = new Error('WhatsApp aceitou o envio, mas nao confirmou a entrega em 12 segundos');
+      error.code = 'DELIVERY_UNCONFIRMED';
+      settle(error);
+    }, timeoutMs);
+  });
+  return {
+    promise,
+    cancel() {
+      if (!settled) settle(null, null);
+    }
+  };
+}
+
+function handleDeliveryStatus(messageId, status) {
+  deliveryWaiters.get(messageId)?.(Number(status));
+}
+
+function shouldProcessStatusUpdate(key, update) {
+  // ACKs de entrega/leitura chegam com fromMe=false; nao filtrar por ele.
+  return Boolean(key?.id) && update?.status !== undefined;
+}
+
+function statusFromReceiptNode(node) {
+  const attrs = node?.attrs || {};
+  if (attrs.error) return errorStatus;
+  const statusByType = {
+    sender: proto.WebMessageInfo.Status.SERVER_ACK,
+    read: proto.WebMessageInfo.Status.READ,
+    'read-self': proto.WebMessageInfo.Status.READ,
+    played: proto.WebMessageInfo.Status.PLAYED
+  };
+  // Receipt sem "type" e o ACK de entrega do aparelho destinatario.
+  return Object.prototype.hasOwnProperty.call(statusByType, attrs.type)
+    ? statusByType[attrs.type]
+    : attrs.type === undefined ? deliveryAckStatus : null;
+}
+
+async function resolveDirectPhoneJid(key, lidMapping) {
+  const remoteJid = String(key?.remoteJid || '');
+  if (!remoteJid || remoteJid.endsWith('@g.us')) return null;
+  const alternateJid = String(key?.remoteJidAlt || '');
+  if (/^\d+@s\.whatsapp\.net$/.test(alternateJid)) return alternateJid;
+  if (!remoteJid.endsWith('@lid')) return remoteJid;
+  if (typeof lidMapping?.getPNForLID !== 'function') return null;
+  const mappedJid = await lidMapping.getPNForLID(remoteJid);
+  return typeof mappedJid === 'string' && /^\d+@s\.whatsapp\.net$/.test(mappedJid)
+    ? mappedJid
+    : null;
 }
 
 async function connect() {
@@ -158,15 +229,30 @@ async function connect() {
 
     socket.ev.on('messages.update', async updates => {
       for (const { key, update } of updates || []) {
-        if (!key?.fromMe || update?.status === undefined) continue;
+        // Baileys 7 entrega os ACKs de entrega/leitura com fromMe=false:
+        // o receipt vem do aparelho destinatario, nao do nosso numero.
+        if (!shouldProcessStatusUpdate(key, update)) continue;
+        handleDeliveryStatus(key.id, update.status);
         let pn = null;
         try {
           pn = await socket.signalRepository?.lidMapping?.getPNForLID(key.remoteJid);
         } catch (error) {
           pn = null;
         }
-        console.log(`[WhatsApp] ACK ${key.remoteJid} pn=${pn || '-'} ${key.id} status=${update.status}`);
+        console.log(
+          `[WhatsApp] ACK ${key.remoteJid} de=${key.fromMe ? 'sim' : 'nao'} pn=${pn || '-'} ${key.id} status=${update.status}`
+        );
       }
+    });
+
+    // Segunda via: alguns builds do Baileys 7 nao repassam todos os receipts
+    // como messages.update. O callback bruto roda antes do evento de alto nivel.
+    socket.ws?.on?.('CB:receipt', node => {
+      const id = node?.attrs?.id;
+      const status = statusFromReceiptNode(node);
+      if (!id || status === null || !deliveryWaiters.has(id)) return;
+      handleDeliveryStatus(id, status);
+      console.log(`[WhatsApp] RECEIPT bruto ${node.attrs.from || '-'} ${id} status=${status}`);
     });
 
     socket.ev.on('messages.upsert', async event => {
@@ -202,7 +288,8 @@ async function connect() {
           }
           if (!message.key.fromMe && !jid.endsWith('@g.us') && text) {
             const bots = require('./bots');
-            await bots.onIncomingMessage(jid, text);
+            const phoneJid = await resolveDirectPhoneJid(message.key, socket.signalRepository?.lidMapping);
+            if (phoneJid) await bots.onIncomingMessage(phoneJid, text);
           }
         } catch (error) {
           console.error('[WhatsApp] Falha ao processar mensagem recebida:', error.message);
@@ -257,17 +344,27 @@ function normalizeDestination(to) {
   return /^\d{10,15}$/.test(digits) ? digits : null;
 }
 
+function findExistingNumber(results) {
+  return results.find(entry => entry?.exists) || null;
+}
+
 async function checkNumber(to) {
   if (!sock || connectionStatus !== 'open') throw new Error('WhatsApp nao conectado');
   const digits = normalizeDestination(to);
   if (!digits) throw new Error('Telefone de destino invalido');
   const results = await sock.onWhatsApp(digits) || [];
-  const found = results.find(entry => entry?.exists && String(entry.jid || '').startsWith(digits));
+  const found = findExistingNumber(results);
   return {
     phone: digits,
     exists: Boolean(found),
     jid: found?.jid || `${digits}@s.whatsapp.net`
   };
+}
+
+async function resolveDestination(to) {
+  const destination = await checkNumber(to);
+  if (!destination.exists) throw new Error(`Numero ${destination.phone} nao existe no WhatsApp`);
+  return destination;
 }
 
 async function recordOutgoing(jid, label, text, id) {
@@ -296,10 +393,7 @@ async function recordOutgoing(jid, label, text, id) {
 }
 
 async function sendMessage(to, text) {
-  if (!sock || connectionStatus !== 'open') throw new Error('WhatsApp nao conectado');
-  const digits = normalizeDestination(to);
-  if (!digits) throw new Error('Telefone de destino invalido');
-  const jid = `${digits}@s.whatsapp.net`;
+  const { phone: digits, jid } = await resolveDestination(to);
   if (typeof text !== 'string' || !text.trim() || text.length > 4096) {
     throw new Error('Mensagem invalida (limite de 4096 caracteres)');
   }
@@ -311,46 +405,95 @@ async function sendMessage(to, text) {
 // O Baileys 7 nao expoe "buttons" no sendMessage, mas o protocolo ainda suporta
 // interactiveMessage; enviamos o protobuf diretamente pelo relay do socket.
 async function sendButtons(to, text, buttons, footer) {
-  if (!sock || connectionStatus !== 'open') throw new Error('WhatsApp nao conectado');
-  const digits = normalizeDestination(to);
-  if (!digits) throw new Error('Telefone de destino invalido');
-  const jid = `${digits}@s.whatsapp.net`;
+  const { phone: digits, jid } = await resolveDestination(to);
   if (typeof text !== 'string' || !text.trim() || text.length > 4096) {
     throw new Error('Mensagem invalida (limite de 4096 caracteres)');
   }
+  const userJid = sock.user?.id;
+  if (!userJid) throw new Error('Sessao do WhatsApp sem identificador do remetente');
+  const generated = generateWAMessageFromContent(
+    jid,
+    createInteractiveMessage(text, buttons, footer),
+    { userJid }
+  );
+  const messageId = generated.key.id;
+  const delivery = waitForDeliveryAck(messageId);
+  try {
+    await sock.relayMessage(jid, generated.message, {
+      messageId,
+      additionalNodes: interactiveRelayNodes()
+    });
+    try {
+      await delivery.promise;
+    } catch (error) {
+      if (error.code !== 'DELIVERY_UNCONFIRMED') throw error;
+      return {
+        ...await recordOutgoing(jid, digits, text.trim(), messageId),
+        deliveryStatus: 'unconfirmed'
+      };
+    }
+  } catch (error) {
+    delivery.cancel();
+    throw error;
+  }
+  return {
+    ...await recordOutgoing(jid, digits, text.trim(), messageId),
+    deliveryStatus: 'delivered'
+  };
+}
+
+function createInteractiveMessage(text, buttons, footer) {
   const items = (Array.isArray(buttons) ? buttons : []).slice(0, 3).map((button, index) => ({
     id: String(button?.id || `op_${index + 1}`),
     text: String(button?.text || '').trim().slice(0, 20)
   })).filter(button => button.text);
   if (items.length < 2) throw new Error('Informe ao menos duas opções clicáveis');
 
-  const message = proto.Message.fromObject({
-    interactiveMessage: {
+  return proto.Message.create({
+    interactiveMessage: proto.Message.InteractiveMessage.create({
       body: { text: text.trim() },
       footer: { text: String(footer || OPTION_FOOTER).trim().slice(0, 60) },
       nativeFlowMessage: {
-        messageVersion: 3,
         buttons: items.map(button => ({
           name: 'quick_reply',
           buttonParamsJson: JSON.stringify({ display_text: button.text, id: button.id })
-        }))
+        })),
+        messageParamsJson: JSON.stringify({ from: 'api', templateId: randomBytes(8).toString('hex') }),
+        messageVersion: 3
       }
-    }
+    })
   });
-
-  const messageId = generateMessageIDV2(sock.user?.id);
-  await sock.relayMessage(jid, message, { messageId });
-  return recordOutgoing(jid, digits, text.trim(), messageId);
 }
 
-// Envia botoes reais e, se o WhatsApp nao aceitar, cai para texto com numeros.
+function interactiveRelayNodes() {
+  // O no <biz> e necessario para o WhatsApp renderizar os botoes clicaveis.
+  // O no <bot biz_bot="1"> NAO deve ser enviado: mensagens marcadas como bot
+  // nao geram receipt de entrega no aparelho destinatario, impossibilitando
+  // confirmar a chegada (o sistema ficava preso em DELIVERY_UNCONFIRMED).
+  return [{
+    tag: 'biz',
+    attrs: {
+      actual_actors: '2',
+      host_storage: '2',
+      privacy_mode_ts: String(Math.floor(Date.now() / 1000))
+    },
+    content: [
+      {
+        tag: 'interactive',
+        attrs: { type: 'native_flow', v: '1' },
+        content: [{ tag: 'native_flow', attrs: { v: '9', name: 'mixed' } }]
+      },
+      {
+        tag: 'quality_control',
+        attrs: { decision_id: randomBytes(20).toString('hex'), source_type: 'third_party' },
+        content: [{ tag: 'decision_source', attrs: { value: 'df' } }]
+      }
+    ]
+  }];
+}
+
 async function sendWithOptions(to, text, buttons, footer) {
-  try {
-    return await sendButtons(to, text, buttons || OPTION_BUTTONS, footer);
-  } catch (error) {
-    console.warn('[WhatsApp] Botoes indisponiveis, enviando texto:', error.message);
-    return sendMessage(to, `${String(text || '').trim()}${OPTION_FALLBACK_TEXT}\n\nResponda PARAR para deixar de receber mensagens automaticas.`);
-  }
+  return sendButtons(to, text, buttons || OPTION_BUTTONS, footer);
 }
 
 module.exports = {
@@ -361,5 +504,14 @@ module.exports = {
   sendButtons,
   sendWithOptions,
   checkNumber,
-  setIO
+  setIO,
+  findExistingNumber,
+  textFromMessage,
+  createInteractiveMessage,
+  resolveDirectPhoneJid,
+  waitForDeliveryAck,
+  handleDeliveryStatus,
+  shouldProcessStatusUpdate,
+  statusFromReceiptNode,
+  interactiveRelayNodes
 };

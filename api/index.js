@@ -49,12 +49,20 @@ try {
   const metaPhoneId = String(process.env.META_WA_PHONE_NUMBER_ID || '').trim();
   const metaEnabled = Boolean(metaToken && metaPhoneId);
   const waConfigured = Boolean(bridgeUrl || metaEnabled);
+  const missingWhatsAppConfiguration = () => {
+    return new Error('A Vercel não mantém uma sessão WhatsApp via QR. Para usar seu WhatsApp e os bots, abra http://127.0.0.1:3000/#offline no computador onde o servidor persistente está rodando.');
+  };
 
   wa = {
     setIO() {},
     getStatus: () => waConfigured
-      ? { status: 'open', qr: null, phone: metaEnabled ? metaPhoneId : null, error: null }
-      : { status: 'unsupported', qr: null, phone: null, error: 'WhatsApp não configurado no Vercel' },
+      ? {
+          status: 'configured',
+          qr: null,
+          phone: null,
+          error: 'API configurada; este painel serverless nao confirma conexao nem entrega.'
+        }
+      : { status: 'unsupported', qr: null, phone: null, error: missingWhatsAppConfiguration().message },
     connect: async () => { throw unavailable('WhatsApp'); },
     disconnect: async () => { throw unavailable('WhatsApp'); },
     checkNumber: async phone => {
@@ -97,7 +105,7 @@ try {
         return { ok: true, id: result.messages?.[0]?.id || null };
       }
 
-      throw unavailable('WhatsApp');
+      throw missingWhatsAppConfiguration();
     },
     sendButtons: async (to, text, buttons, footer) => {
       const digits = normalizePhone(to);
@@ -107,7 +115,7 @@ try {
 
       if (bridgeUrl) {
         return postJson(
-          `${bridgeUrl}/api/whatsapp/send-buttons`,
+          `${bridgeUrl}/api/whatsapp/send-options`,
           {
             'Content-Type': 'application/json',
             ...(process.env.WHATSAPP_BRIDGE_KEY
@@ -145,18 +153,12 @@ try {
             }
           }
         );
-        return { ok: true, id: result.messages?.[0]?.id || null };
+        return { ok: true, id: result.messages?.[0]?.id || null, deliveryStatus: 'unconfirmed' };
       }
 
-      throw unavailable('WhatsApp');
+      throw missingWhatsAppConfiguration();
     },
-    sendWithOptions: async (to, text, buttons, footer) => {
-      try {
-        return await wa.sendButtons(to, text, buttons, footer);
-      } catch (error) {
-        return wa.sendMessage(to, `${String(text || '').trim()}\n\nResponda 1 para estou verificando, 2 para suporte ou 3 para já resolvi. Responda PARAR para deixar de receber mensagens automáticas.`);
-      }
-    }
+    sendWithOptions: (to, text, buttons, footer) => wa.sendButtons(to, text, buttons, footer)
   };
   bots = {
     getSchedulerStatus: () => 'unsupported',

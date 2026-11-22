@@ -34,14 +34,19 @@ A conexão por QR usa Baileys/WhatsApp Web, não a API oficial Meta. É uma inte
 ## Cadastro e avisos
 
 - Ao cadastrar um responsável, o painel valida o DDD brasileiro (com ou sem DDI `55`) e consulta o WhatsApp, bloqueando números inexistentes. Se a consulta estiver indisponível, o cadastro prossegue com aviso.
-- O envio de avisos usa **opções clicáveis reais** no WhatsApp: **Em análise**, **Falar com técnico** e **Informei resolução**. Se o WhatsApp não aceitar os botões, o sistema envia texto com as opções `1`, `2` e `3`.
+- O envio de avisos usa opções clicáveis para o cliente no WhatsApp: **Estou verificando**, **Preciso de suporte** e **Já resolvi**. Se o WhatsApp não aceitar as opções interativas, o envio falha explicitamente em vez de registrar como enviado um texto sem botões.
 - As respostas dos botões (ou os números digitados) atualizam o status automaticamente.
 
 ## Bots e consentimento
 
 - Os bots rodam de segunda a sexta-feira no fuso `America/Cuiaba`. Os horários, o limite de tentativas e o modo automático são configurados em **Config. Bots**.
-- Antes do primeiro envio automático, confirme que o responsável autorizou as mensagens em **Config. Bots → Consentimento**.
-- Os bots não enviam para contatos sem consentimento, bloqueados, fora do horário comercial ou que já receberam um aviso nas últimas 24 horas.
+- Uma janela de horário temporária pode ser configurada por data; ela usa o fuso `America/Cuiaba` e deixa de valer automaticamente após a meia-noite da data informada.
+- O cadastro de uma câmera registra o consentimento informado para o responsável, desde que não exista opt-out ou bloqueio anterior. Contatos já cadastrados sem registro de consentimento também são atualizados na inicialização do banco.
+- Se um responsável pedir para parar, a resposta `PARAR` bloqueia novos envios. Um opt-out ou bloqueio existente não é removido por novos cadastros; só reative o contato após uma nova autorização, em **Config. Bots → Consentimento**.
+- A confirmação de entrega vem do receipt do aparelho destinatário (`DELIVERY_ACK`, status `3`), capturado em `messages.update` e no callback bruto `CB:receipt`. O envio interativo usa apenas o nó `<biz>` para renderizar os botões; **não** incluir `<bot biz_bot="1">`, porque mensagens marcadas como bot não geram receipt de entrega e ficariam presas em `unconfirmed`.
+- Se o WhatsApp aceitar o relay mas não confirmar a entrega em 12 segundos, o painel registra o envio como não confirmado, mostra-o na Central WhatsApp e não marca a câmera como notificada. Confira a conversa/aparelho antes de reenviar; a tentativa fica protegida contra duplicação automática por 24 horas.
+- O painel e o backend permitem apenas um envio interativo por contato de cada vez, evitando envios duplicados enquanto aguardam a confirmação.
+- Os bots não enviam para contatos sem consentimento, bloqueados ou fora do horário comercial. O log e a data do último aviso na câmera impedem novas tentativas por 24 horas, inclusive quando o log está indisponível; falhas recentes também evitam repetição automática.
 - O botão **Executar cobrança** e o botão **Executar lembrete** pedem confirmação antes de iniciar. Eles podem enviar mensagens reais aos contatos autorizados.
 - Respostas `1`, `2`, `3` ou `PARAR` atualizam o atendimento. `PARAR` bloqueia novos envios automáticos.
 
@@ -60,7 +65,7 @@ Os JSONs em `workflows/` são fluxos antigos para a API oficial Meta e permanece
 | `POST` / `PUT` / `DELETE` | `/api/cameras` | Cadastro, atualização e remoção |
 | `GET` / `POST` | `/api/log` | Consulta e grava eventos |
 | `GET` / `POST` | `/api/whatsapp/status`, `/api/whatsapp/connect`, `/api/whatsapp/send` | Estado, conexão e envio pelo WhatsApp |
-| `POST` | `/api/whatsapp/send-options` | Envio com opções clicáveis (com retorno para texto) |
+| `POST` | `/api/whatsapp/send-options` | Envio com opções clicáveis |
 | `GET` | `/api/whatsapp/check/:phone` | Verifica se o número existe no WhatsApp |
 | `GET` | `/api/whatsapp/conversations` | Conversas armazenadas |
 | `POST` | `/api/consent` | Registra ou remove autorização de mensagens |
@@ -76,6 +81,8 @@ Defina estas variáveis de ambiente no projeto da Vercel (o `.env` local não é
 - Não defina `API_KEY` neste deploy: o painel não envia o cabeçalho `x-api-key` e todas as chamadas retornariam 401. Proteja o acesso com a **Password Protection** da Vercel ou restrição de IP.
 - Para WhatsApp pela API oficial Meta: `META_WA_ACCESS_TOKEN` e `META_WA_PHONE_NUMBER_ID`.
 - Para usar uma conexão Baileys local por meio seguro: `WHATSAPP_BRIDGE_URL` e opcionalmente `WHATSAPP_BRIDGE_KEY`.
+
+O painel publicado na Vercel não mantém a sessão do WhatsApp conectada por QR. Para usar seu próprio WhatsApp e os bots Baileys, abra `http://127.0.0.1:3000` no computador onde o servidor persistente está em execução, ou hospede o backend em uma VPS/serviço persistente. O estado `configured` na Vercel confirma apenas que há credenciais de envio; não confirma conexão nem entrega.
 
 **Sem Postgres remoto configurado**, o adaptador usa `db-memory.js`: o painel e as APIs respondem normalmente, mas os dados **não persistem** entre invocações/instâncias. O `/api/health` indica `"storage":"memory"`. Para persistência, configure as variáveis acima com um banco alcançável pela Vercel.
 

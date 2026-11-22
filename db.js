@@ -1,5 +1,6 @@
 const { Pool } = require('pg');
 const { getConfig } = require('./db-config');
+const { normalizarNumeroWhatsapp } = require('./phone-utils');
 
 const config = getConfig();
 
@@ -103,6 +104,15 @@ async function init() {
     await pool.query("UPDATE bot_config SET value='17',updated_at=$1 WHERE key='maintenance_hour' AND value='18'", [new Date().toISOString()]);
     await pool.query("INSERT INTO app_migrations (name,applied_at) VALUES ('maintenance-hour-default',$1)", [new Date().toISOString()]);
   }
+  const consentMigration = await pool.query("SELECT name FROM app_migrations WHERE name='registered-camera-consents'");
+  if (consentMigration.rows.length === 0) {
+    const cameras = await pool.query('SELECT DISTINCT responsavel_telefone FROM cameras WHERE responsavel_telefone IS NOT NULL');
+    for (const row of cameras.rows) {
+      const phone = normalizarNumeroWhatsapp(row.responsavel_telefone);
+      if (phone) await ensureConsent(phone);
+    }
+    await pool.query("INSERT INTO app_migrations (name,applied_at) VALUES ('registered-camera-consents',$1) ON CONFLICT (name) DO NOTHING", [new Date().toISOString()]);
+  }
   console.log('[DB] Schema pronto');
 }
 
@@ -192,6 +202,17 @@ async function setConsent(phone, optedIn) {
   if (typeof optedIn !== 'boolean') throw new TypeError('optedIn deve ser booleano');
   await pool.query(`INSERT INTO consent (phone,opted_in,updated_at) VALUES ($1,$2,$3) ON CONFLICT (phone) DO UPDATE SET opted_in=$2,updated_at=$3`, [phone, optedIn?1:0, new Date().toISOString()]);
 }
+async function ensureConsent(phone) {
+  const result = await pool.query(
+    `INSERT INTO consent (phone,opted_in,updated_at)
+     SELECT $1,1,$2
+     WHERE NOT EXISTS (SELECT 1 FROM consent WHERE phone=$1)
+       AND NOT EXISTS (SELECT 1 FROM blocklist WHERE phone=$1)
+     ON CONFLICT (phone) DO NOTHING`,
+    [phone, new Date().toISOString()]
+  );
+  return result.rowCount > 0;
+}
 async function block(phone, reason) {
   await pool.query(`INSERT INTO blocklist (phone,reason,created_at) VALUES ($1,$2,$3) ON CONFLICT (phone) DO NOTHING`, [phone, reason||'', new Date().toISOString()]);
 }
@@ -265,4 +286,4 @@ async function getReports() {
   return { counts, total: cameras.rows.length, tempoMedioHoras: tempoMedio, cobrancasEnviadas, erros, escalonamentos, resolvidas: resolvidas.length, enviadasHoje, recebidasHoje, clientesAguardando: Number(clientesAguardando.rows[0].c) };
 }
 
-module.exports = { pool, init, getCameras, upsertCamera, updateCamera, deleteCamera, addLog, getLog, hasRecentLog, getConversations, upsertConversation, incrementUnread, getMessages, addMessage, markRead, isBlocked, hasConsent, getConsents, setConsent, block, unblock, getBlocklist, getTemplates, getTemplate, upsertTemplate, deleteTemplate, renderTemplate, getBotConfig, setBotConfig, getReports };
+module.exports = { pool, init, getCameras, upsertCamera, updateCamera, deleteCamera, addLog, getLog, hasRecentLog, getConversations, upsertConversation, incrementUnread, getMessages, addMessage, markRead, isBlocked, hasConsent, getConsents, setConsent, ensureConsent, block, unblock, getBlocklist, getTemplates, getTemplate, upsertTemplate, deleteTemplate, renderTemplate, getBotConfig, setBotConfig, getReports };
