@@ -196,6 +196,10 @@ async function block(phone, reason) {
 async function unblock(phone) {
   await pool.query('DELETE FROM blocklist WHERE phone=$1', [phone]);
 }
+async function getBlocklist() {
+  const r = await pool.query('SELECT * FROM blocklist ORDER BY created_at DESC');
+  return r.rows;
+}
 async function getTemplates() {
   const r = await pool.query('SELECT * FROM message_templates ORDER BY nome');
   return r.rows;
@@ -259,4 +263,4 @@ async function getReports() {
   return { counts, total: cameras.rows.length, tempoMedioHoras: tempoMedio, cobrancasEnviadas, erros, escalonamentos, resolvidas: resolvidas.length, enviadasHoje, recebidasHoje, clientesAguardando: Number(clientesAguardando.rows[0].c) };
 }
 
-module.exports = { pool, init, getCameras, upsertCamera, updateCamera, deleteCamera, addLog, getLog, hasRecentLog, getConversations, upsertConversation, incrementUnread, getMessages, addMessage, markRead, isBlocked, hasConsent, getConsents, setConsent, block, unblock, getTemplates, getTemplate, upsertTemplate, deleteTemplate, renderTemplate, getBotConfig, setBotConfig, getReports };
+module.exports = { pool, init, getCameras, upsertCamera, updateCamera, deleteCamera, addLog, getLog, hasRecentLog, getConversations, upsertConversation, incrementUnread, getMessages, addMessage, markRead, isBlocked, hasConsent, getConsents, setConsent, block, unblock, getBlocklist, getTemplates, getTemplate, upsertTemplate, deleteTemplate, renderTemplate, getBotConfig, setBotConfig, getReports };

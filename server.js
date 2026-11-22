@@ -353,8 +353,7 @@ function createApp(options = {}) {
   });
   app.get('/api/blocklist', async (req, res) => {
     try {
-      const result = await db.pool.query('SELECT * FROM blocklist ORDER BY created_at DESC');
-      return res.json(result.rows);
+      return res.json(await db.getBlocklist());
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }

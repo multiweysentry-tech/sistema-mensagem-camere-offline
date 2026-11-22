@@ -138,6 +138,10 @@ async function unblock(phone) {
   state.blocklist.delete(phone);
 }
 
+async function getBlocklist() {
+  return [...state.blocklist.values()].sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+}
+
 async function getTemplates() {
   return [...state.templates.values()].sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
 }
@@ -231,6 +235,7 @@ module.exports = {
   setConsent,
   block,
   unblock,
+  getBlocklist,
   getTemplates,
   getTemplate,
   upsertTemplate,
