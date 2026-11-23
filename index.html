@@ -540,18 +540,97 @@ async function loadBotCfg(){try{botCfg=await apiRequest("/api/bots/config");cons
 async function saveBotCfg(){const form=document.getElementById("botcfg-form");const data={};new FormData(form).forEach((v,k)=>{data[k]=v});try{await apiRequest("/api/bots/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});toast("Configuração salva");await loadBotCfg()}catch(e){toast(`Falha ao salvar: ${e.message}`)}}
 async function setContactConsent(phone,optedIn){if(!confirm(optedIn?"Confirma que este contato autorizou receber mensagens automáticas?":"Confirma a remoção da autorização?"))return;try{await apiRequest("/api/consent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone,opted_in:optedIn})});toast(optedIn?"Consentimento registrado":"Consentimento removido");await loadBotCfg()}catch(e){toast(`Falha ao atualizar consentimento: ${e.message}`)}}
 async function runBot(kind){if(!confirm("O bot poderá enviar mensagens reais aos contatos autorizados. Deseja continuar?"))return;try{const result=await apiRequest(`/api/bots/${kind}/run`,{method:"POST"});const sent=result.result?.sent||0,failed=result.result?.failed||0,unconfirmed=result.result?.unconfirmed||0,pending=result.result?.pending||0;toast(failed||unconfirmed||pending?`${sent} confirmado(s), ${pending} aguardando entrega, ${unconfirmed} sem confirmação, ${failed} falha(s). Confira WhatsApp e logs.`:`Bot concluído: ${sent} envio(s)`)}catch(e){toast(`Falha ao executar bot: ${e.message}`)}}
+let pdfScan=null;
+function pdfFileToBase64(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>{const s=String(r.result||"");resolve(s.includes(",")?s.split(",")[1]:s)};r.onerror=()=>reject(new Error("Falha ao ler arquivo"));r.readAsDataURL(file);});}
+async function scanPdfDestinacao(){
+ const input=document.getElementById("pdf-file");
+ const file=input&&input.files&&input.files[0];
+ if(!file){toast("Selecione um arquivo PDF");return;}
+ if(!/\.pdf$/i.test(file.name)){toast("Selecione um arquivo .pdf");return;}
+ const btn=document.getElementById("btn-pdf-scan");
+ if(btn){btn.disabled=true;btn.textContent="Varrendo PDF...";}
+ try{
+  const pdfBase64=await pdfFileToBase64(file);
+  const resp=await apiRequest("/api/import/pdf/scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pdfBase64,filename:file.name})});
+  pdfScan=resp.result||resp;
+  pdfScan.assignments=(pdfScan.assignments||[]).map(a=>Object.assign({selected:a.action==="proposed"},a));
+  toast(`Varredura concluída: ${pdfScan.detected||0} câmera(s) detectada(s), ${pdfScan.proposed||0} com sugestão de destino.`);
+  draw();
+ }catch(e){toast(`Falha na varredura do PDF: ${e.message}`);}
+ finally{if(btn){btn.disabled=false;btn.textContent="Varrer PDF";}}
+}
+function togglePdfAssign(idx,checked){ if(!pdfScan||!pdfScan.assignments[idx])return; pdfScan.assignments[idx].selected=!!checked; }
+function setPdfAssignField(idx,field,value){ if(!pdfScan||!pdfScan.assignments[idx])return; pdfScan.assignments[idx][field]=value; pdfScan.assignments[idx].selected=true; }
+async function applyPdfDestinacao(){
+ if(!pdfScan||!Array.isArray(pdfScan.assignments)) {toast("Faça a varredura do PDF antes.");return;}
+ // coleta edições feitas na tabela
+ document.querySelectorAll('[data-pdf-idx][data-pdf-field]').forEach(el=>{
+  const idx=Number(el.getAttribute('data-pdf-idx'));
+  const field=el.getAttribute('data-pdf-field');
+  if(!pdfScan.assignments[idx]) return;
+  pdfScan.assignments[idx][field]=el.value;
+ });
+ const assignments=pdfScan.assignments.filter(a=>a.selected).map(a=>({cameraId:a.cameraId,responsavel_nome:a.responsavel_nome,responsavel_telefone:a.responsavel_telefone,local:a.local}));
+ if(!assignments.length){toast("Selecione ao menos uma câmera para destinar.");return;}
+ if(!confirm(`Aplicar destino para ${assignments.length} câmera(s)?`)) return;
+ const btn=document.getElementById("btn-pdf-apply");
+ if(btn){btn.disabled=true;btn.textContent="Aplicando...";}
+ try{
+  const resp=await apiRequest("/api/import/pdf/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({assignments})});
+  const s=resp.summary||{};
+  toast(`Destinação aplicada: ${s.applied||0} atualizada(s), ${s.skipped||0} ignorada(s).`);
+  pdfScan=null;
+  await loadState();
+  draw();
+ }catch(e){toast(`Falha ao aplicar destinação: ${e.message}`);}
+ finally{if(btn){btn.disabled=false;btn.textContent="Aplicar destinos selecionados";}}
+}
 function botCfgView(){
  const T=TABS.find(x=>x.k===tab);
  const cfg=botCfg||{};
  const fields=[{k:'billing_hour',l:'Hora do aviso de câmeras offline (0-23)'},{k:'maintenance_hour',l:'Hora do lembrete (0-23)'},{k:'auto_mode',l:'Modo automático (true/false)'},{k:'max_attempts',l:'Limite de tentativas'},{k:'business_hours_start',l:'Início horário comercial'},{k:'business_hours_end',l:'Fim horário comercial'}];
  const inputs=fields.map(f=>`<label>${f.l}</label><input name="${f.k}" value="${esc(cfg[f.k]||'')}" form="botcfg-form">`).join("");
  const contactList=cams.filter((camera,index,list)=>list.findIndex(item=>phoneKey(item.responsavel_telefone)===phoneKey(camera.responsavel_telefone))===index).map(camera=>{const key=phoneKey(camera.responsavel_telefone);const phone=PU.normalizarContato(camera.responsavel_telefone);const optedIn=consentList.some(item=>phoneKey(item.phone)===key&&item.opted_in);return `<div class="act" style="justify-content:space-between;border-top:1px solid var(--line);padding:8px 0"><span>${esc(camera.responsavel_nome)} · ${esc(phone)}</span><button class="btn s" onclick="setContactConsent('${q(phone)}',${!optedIn})">${optedIn?"Desativar bot":"Registrar consentimento"}</button></div>`}).join("")||`<div class="empty">Cadastre responsáveis para gerenciar consentimentos.</div>`;
+
+ let pdfBox = `<div class="box" style="max-width:920px;margin-top:16px">
+  <h2>Destinar câmeras por PDF (bot de varredura)</h2>
+  <p class="sub" style="padding:0 0 10px">Envie um PDF. O bot faz varredura no texto, identifica câmeras cadastradas e sugere destino (responsável/telefone/local). Revise antes de aplicar.</p>
+  <div class="act" style="gap:8px;flex-wrap:wrap;align-items:center">
+    <input id="pdf-file" type="file" accept="application/pdf,.pdf" style="max-width:420px">
+    <button class="btn p" id="btn-pdf-scan" onclick="scanPdfDestinacao()">Varrer PDF</button>
+    ${pdfScan?`<button class="btn" id="btn-pdf-apply" onclick="applyPdfDestinacao()">Aplicar destinos selecionados</button><button class="btn s" onclick="pdfScan=null;draw()">Limpar</button>`:''}
+  </div>`;
+ if(pdfScan){
+  const rows=(pdfScan.assignments||[]).map((a,idx)=>{
+    const conf=a.confidence==='alta'?'<span class="tag g">alta</span>':a.confidence==='media'?'<span class="tag y">média</span>':'<span class="tag r">baixa</span>';
+    return `<tr>
+      <td style="text-align:center"><input type="checkbox" ${a.selected?'checked':''} onchange="togglePdfAssign(${idx},this.checked)"></td>
+      <td><b>${esc(a.cameraId)}</b><div class="sub" style="padding:0">${esc(a.camera_nome||'')}</div></td>
+      <td>${esc(a.currentResponsavel||'—')}<div class="sub" style="padding:0">${esc(a.currentTelefone||'')}</div></td>
+      <td><input data-pdf-idx="${idx}" data-pdf-field="responsavel_nome" value="${esc(a.responsavel_nome||'')}" placeholder="Responsável" style="width:160px"></td>
+      <td><input data-pdf-idx="${idx}" data-pdf-field="responsavel_telefone" value="${esc(a.responsavel_telefone||'')}" placeholder="Telefone" style="width:140px"></td>
+      <td><input data-pdf-idx="${idx}" data-pdf-field="local" value="${esc(a.local||'')}" placeholder="Local/Destino" style="width:160px"></td>
+      <td>${conf}</td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="7" class="empty">Nenhuma câmera encontrada no PDF.</td></tr>`;
+  pdfBox += `
+  <div class="kpis" style="margin-top:12px">
+    <div class="kpi"><b>${pdfScan.pages||0}</b><span>páginas</span></div>
+    <div class="kpi"><b>${pdfScan.detected||0}</b><span>câmeras detectadas</span></div>
+    <div class="kpi"><b>${pdfScan.proposed||0}</b><span>com sugestão</span></div>
+    <div class="kpi"><b>${pdfScan.detectedOnly||0}</b><span>só detectadas</span></div>
+  </div>
+  <div style="overflow:auto;margin-top:10px"><table class="tbl" style="min-width:980px"><thead><tr><th></th><th>Câmera</th><th>Atual</th><th>Novo responsável</th><th>Novo telefone</th><th>Novo local/destino</th><th>Confiança</th></tr></thead><tbody>${rows}</tbody></table></div>
+  <details style="margin-top:10px"><summary style="cursor:pointer">Ver texto extraído do PDF (prévia)</summary><pre style="white-space:pre-wrap;background:#f8fafc;border:1px solid var(--line);padding:10px;border-radius:10px;max-height:240px;overflow:auto">${esc(pdfScan.textPreview||'')}</pre></details>`;
+ }
+ pdfBox += `</div>`;
+
  return `<h1>Configuração dos Bots</h1><p class="lead">${T.d}</p>
  <div class="box" style="max-width:520px">
   <form id="botcfg-form">${inputs}</form>
   <div class="act" style="margin-top:12px"><button class="btn p" onclick="saveBotCfg()">Salvar configuração</button><button class="btn" onclick="runBot('billing')">Executar cobrança</button><button class="btn" onclick="runBot('maintenance')">Executar lembrete</button></div>
   <p class="sub" style="padding:10px 0 0">Os bots leem essas configurações a cada execução.</p>
- </div><div class="box" style="max-width:520px;margin-top:16px"><h2>Consentimento para mensagens automáticas</h2>${contactList}</div>`;
+ </div><div class="box" style="max-width:520px;margin-top:16px"><h2>Consentimento para mensagens automáticas</h2>${contactList}</div>${pdfBox}`;
 }
 let blockData={blocklist:[],consent:[]};
 async function loadBlockData(){ try{ blockData.blocklist=await apiRequest("/api/blocklist"); if(tab==="blocklist")draw(); }catch(e){toast(`Falha ao carregar bloqueios: ${e.message}`)} }

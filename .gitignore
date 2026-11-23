@@ -16,3 +16,10 @@ test_out.txt
 exec.log
 *.txt
 .vercel
+
+# Importação NOC diária (arquivos locais)
+importacao/entrada/*.csv
+importacao/entrada/*.CSV
+importacao/processados/
+importacao/erros/
+!importacao/**/.gitkeep

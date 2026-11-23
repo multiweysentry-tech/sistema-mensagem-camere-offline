@@ -86,6 +86,7 @@ function createApp(options = {}) {
   const bots = options.bots || require('./bots');
   const auth = options.auth || null;
   const sessionManager = options.sessionManager || null;
+  const nocWatcher = options.nocWatcher || null;
   const app = express();
   const whatsappSendsInProgress = new Set();
   const server = http.createServer(app);
@@ -175,7 +176,12 @@ function createApp(options = {}) {
     }, tenantId);
   }
 
-  app.use(express.json({ limit: '1mb' }));
+  const jsonParserDefault = express.json({ limit: '1mb' });
+  const jsonParserLarge = express.json({ limit: '15mb' });
+  app.use((req, res, next) => {
+    if (req.path === '/api/import/pdf/scan') return jsonParserLarge(req, res, next);
+    return jsonParserDefault(req, res, next);
+  });
   app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
   app.get('/logo-sentry.png', (req, res) => res.sendFile(path.join(__dirname, 'logo-sentry.png')));
   app.get('/phone-utils.js', (req, res) => {
@@ -664,6 +670,94 @@ function createApp(options = {}) {
       return res.status(500).json({ erro: error.message });
     }
   });
+
+  // --- Importação NOC (CSV exportado do sistema de câmeras) ---
+  app.get('/api/import/noc/status', async (req, res) => {
+    try {
+      return res.json({
+        watcher: nocWatcher ? nocWatcher.getStatus() : { running: false, reason: 'watcher não iniciado neste processo' }
+      });
+    } catch (error) {
+      return res.status(500).json({ erro: error.message });
+    }
+  });
+
+  app.post('/api/import/noc', async (req, res) => {
+    try {
+      const { syncNocCameras } = require('./lib/noc-import');
+      const csv = typeof req.body?.csv === 'string' ? req.body.csv : '';
+      if (!csv.trim()) {
+        return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Envie o conteúdo do CSV em body.csv' });
+      }
+      const tenantId = req.tenantId || 'default';
+      const dryRun = req.body?.dryRun === true;
+      const summary = await syncNocCameras({ db, csvText: csv, tenantId, dryRun, sourceFile: req.body?.filename || 'upload.csv' });
+      await db.addLog({
+        timestamp: new Date().toISOString(),
+        camera_id: '',
+        camera_nome: summary.sourceFile || 'NOC CSV',
+        responsavel_telefone: '',
+        acao: 'IMPORTACAO_NOC',
+        detalhe: `${dryRun ? '[DRY-RUN] ' : ''}${summary.created} criadas, ${summary.updated} atualizadas, ${summary.unchanged} sem mudança, ${summary.offline} offline, ${summary.online} online`,
+        status_anterior: '',
+        status_novo: '',
+        trace_id: null
+      }, tenantId).catch(() => {});
+      return res.json({ ok: true, summary });
+    } catch (error) {
+      return res.status(400).json({ codigo: 'IMPORT_ERROR', erro: error.message });
+    }
+  });
+
+  app.post('/api/import/noc/run', async (req, res) => {
+    try {
+      if (!nocWatcher) return res.status(400).json({ codigo: 'WATCHER_DISABLED', erro: 'Watcher NOC não está ativo. Configure NOC_WATCH_ENABLED=true e NOC_WATCH_DIR.' });
+      const result = await nocWatcher.scanOnce();
+      return res.json({ ok: true, result, watcher: nocWatcher.getStatus() });
+    } catch (error) {
+      return res.status(500).json({ erro: error.message });
+    }
+  });
+
+  // --- Importação PDF: varredura para destinar/atribuir câmeras ---
+  app.post('/api/import/pdf/scan', express.json({ limit: '15mb' }), async (req, res) => {
+    try {
+      const { scanPdfForAssignments } = require('./lib/pdf-import');
+      const pdfBase64 = String(req.body?.pdfBase64 || req.body?.base64 || '');
+      const filePath = String(req.body?.filePath || '');
+      const filename = String(req.body?.filename || 'documento.pdf');
+      if (!pdfBase64 && !filePath) {
+        return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Envie pdfBase64 (ou filePath no servidor local)' });
+      }
+      const result = await scanPdfForAssignments({
+        db,
+        tenantId: req.tenantId || 'default',
+        base64: pdfBase64 || undefined,
+        filePath: filePath || undefined,
+        filename
+      });
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(400).json({ codigo: 'PDF_SCAN_ERROR', erro: error.message });
+    }
+  });
+
+  app.post('/api/import/pdf/apply', async (req, res) => {
+    try {
+      const { applyPdfAssignments } = require('./lib/pdf-import');
+      const assignments = Array.isArray(req.body?.assignments) ? req.body.assignments : [];
+      if (!assignments.length) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Nenhuma atribuição informada' });
+      const summary = await applyPdfAssignments({
+        db,
+        tenantId: req.tenantId || 'default',
+        assignments,
+        dryRun: req.body?.dryRun === true
+      });
+      return res.json({ ok: true, summary });
+    } catch (error) {
+      return res.status(400).json({ codigo: 'PDF_APPLY_ERROR', erro: error.message });
+    }
+  });
   app.get('/api/bots/config', async (req, res) => {
     try {
       return res.json(await db.getBotConfig(req.tenantId));
@@ -928,7 +1022,19 @@ if (require.main === module) {
     log('info', 'wa.meta_mode', { graphVersion: process.env.META_WA_GRAPH_VERSION || 'v27.0' });
   }
 
-  const app = createApp({ db, wa, bots, auth, sessionManager });
+  const { createNocWatcher } = require('./lib/noc-watch');
+  const nocWatchEnabled = !SERVERLESS && process.env.NOC_WATCH_ENABLED !== 'false';
+  const nocWatcher = nocWatchEnabled
+    ? createNocWatcher({
+        db,
+        logger: { log: (...a) => log('info', 'noc_watch', { msg: a.join(' ') }), warn: (...a) => log('warn', 'noc_watch', { msg: a.join(' ') }), error: (...a) => log('error', 'noc_watch', { msg: a.join(' ') }) },
+        dir: process.env.NOC_WATCH_DIR || path.join(__dirname, 'importacao', 'entrada'),
+        tenantId: process.env.NOC_IMPORT_TENANT || 'default',
+        intervalMs: Number(process.env.NOC_WATCH_INTERVAL_MS || 60000)
+      })
+    : null;
+
+  const app = createApp({ db, wa, bots, auth, sessionManager, nocWatcher });
   const queue = createQueue({ db, workerId: `sentry-${process.pid}`, pollMs: 1500 });
 
   function instanciaDoPayload(payload) {
@@ -956,6 +1062,7 @@ if (require.main === module) {
   });
 
   async function shutdown() {
+    if (nocWatcher) nocWatcher.stop();
     queue.stop();
     if (sessionManager) await Promise.allSettled(sessionManager.all().map(session => session.disconnect({ logout: false })));
     app.server.close(() => process.exit(0));
@@ -979,6 +1086,7 @@ if (require.main === module) {
       log('info', 'server.listening', { host, port, auth: Boolean(auth) });
       bots.startSchedulers().catch(error => log('error', 'bots.scheduler_failed', { error }));
       if (sessionManager) sessionManager.restore().catch(error => log('error', 'wa.restore_failed', { error }));
+      if (nocWatcher) nocWatcher.start();
       queue.start();
     });
   }
