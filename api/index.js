@@ -9,6 +9,10 @@ let loadError = null;
 // No Vercel, localhost aponta para a propria funcao e nunca alcanca o Postgres local.
 const { isRemote: hasRemotePostgres } = require('../db-config');
 
+const { normalizarContato } = require('../phone-utils');
+const whatsappRemoto = require('../lib/whatsapp');
+const { createMetaWhatsapp } = require('../lib/meta-whatsapp');
+
 const unavailable = feature =>
   new Error(`${feature} indisponível no Vercel: exige processo persistente. Use npm start em um servidor próprio.`);
 
@@ -19,7 +23,7 @@ function getBridgeUrl() {
 }
 
 function normalizePhone(value) {
-  return String(value || '').replace(/\D/g, '');
+  return normalizarContato(value);
 }
 
 async function postJson(url, headers, body) {
@@ -48,14 +52,34 @@ try {
   const metaToken = String(process.env.META_WA_ACCESS_TOKEN || '').trim();
   const metaPhoneId = String(process.env.META_WA_PHONE_NUMBER_ID || '').trim();
   const metaEnabled = Boolean(metaToken && metaPhoneId);
-  const waConfigured = Boolean(bridgeUrl || metaEnabled);
+  const requestedProvider = String(process.env.WHATSAPP_PROVIDER || '').trim().toLowerCase();
+  if (!['', 'meta', 'baileys'].includes(requestedProvider)) {
+    throw new Error('WHATSAPP_PROVIDER deve ser "meta" ou "baileys" no deploy Vercel');
+  }
+  if (requestedProvider === 'meta' && !metaEnabled) {
+    throw new Error('WHATSAPP_PROVIDER=meta exige META_WA_ACCESS_TOKEN e META_WA_PHONE_NUMBER_ID');
+  }
+  const metaWa = requestedProvider === 'meta' || (!requestedProvider && !whatsappRemoto.isRemoteConfigured() && !bridgeUrl && metaEnabled)
+    ? createMetaWhatsapp({ db })
+    : null;
+  if (metaWa && (!metaWa.webhookConfig.secret || !metaWa.webhookConfig.verifyToken)) {
+    throw new Error('WhatsApp Meta no Vercel exige META_WA_APP_SECRET e META_WA_VERIFY_TOKEN para validar o webhook');
+  }
+  const remoto = metaWa ? null : whatsappRemoto.isRemoteConfigured() ? whatsappRemoto.createRemoteWhatsapp() : null;
+  const activeBridgeUrl = metaWa ? null : bridgeUrl;
+  const waConfigured = Boolean(remoto || activeBridgeUrl || metaWa);
   const missingWhatsAppConfiguration = () => {
     return new Error('A Vercel não mantém uma sessão WhatsApp via QR. Para usar seu WhatsApp e os bots, abra http://127.0.0.1:3000/#offline no computador onde o servidor persistente está rodando.');
   };
 
   wa = {
-    setIO() {},
-    getStatus: () => waConfigured
+    provider: metaWa ? 'meta' : undefined,
+    remote: Boolean(metaWa),
+    webhookConfig: metaWa?.webhookConfig,
+    setIO(socketServer) { metaWa?.setIO(socketServer); },
+    getStatus: () => metaWa
+      ? metaWa.getStatus()
+      : waConfigured
       ? {
           status: 'configured',
           qr: null,
@@ -70,13 +94,13 @@ try {
       if (!digits) throw new Error('Telefone inválido');
       return { phone: digits, exists: null, jid: `${digits}@s.whatsapp.net` };
     },
-    sendMessage: async (to, text) => {
+    sendMessage: async (to, text, metadata) => {
       const digits = normalizePhone(to);
       if (!/^\d{10,15}$/.test(digits)) throw new Error('Telefone de destino inválido');
 
-      if (bridgeUrl) {
+      if (activeBridgeUrl) {
         const result = await postJson(
-          `${bridgeUrl}/api/whatsapp/send`,
+          `${activeBridgeUrl}/api/whatsapp/send`,
           {
             'Content-Type': 'application/json',
             ...(process.env.WHATSAPP_BRIDGE_KEY
@@ -88,34 +112,19 @@ try {
         return result;
       }
 
-      if (metaEnabled) {
-        const result = await postJson(
-          `https://graph.facebook.com/v20.0/${encodeURIComponent(metaPhoneId)}/messages`,
-          {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${metaToken}`
-          },
-          {
-            messaging_product: 'whatsapp',
-            to: digits,
-            type: 'text',
-            text: { body: text }
-          }
-        );
-        return { ok: true, id: result.messages?.[0]?.id || null };
-      }
+      if (metaWa) return metaWa.sendMessage(digits, text, metadata);
 
       throw missingWhatsAppConfiguration();
     },
-    sendButtons: async (to, text, buttons, footer) => {
+    sendButtons: async (to, text, buttons, footer, metadata) => {
       const digits = normalizePhone(to);
       if (!/^\d{10,15}$/.test(digits)) throw new Error('Telefone de destino inválido');
       const options = Array.isArray(buttons) ? buttons.slice(0, 3) : [];
       if (options.length < 2) throw new Error('Informe ao menos duas opções clicáveis');
 
-      if (bridgeUrl) {
+      if (activeBridgeUrl) {
         return postJson(
-          `${bridgeUrl}/api/whatsapp/send-options`,
+          `${activeBridgeUrl}/api/whatsapp/send-options`,
           {
             'Content-Type': 'application/json',
             ...(process.env.WHATSAPP_BRIDGE_KEY
@@ -126,42 +135,24 @@ try {
         );
       }
 
-      if (metaEnabled) {
-        const result = await postJson(
-          `https://graph.facebook.com/v20.0/${encodeURIComponent(metaPhoneId)}/messages`,
-          {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${metaToken}`
-          },
-          {
-            messaging_product: 'whatsapp',
-            to: digits,
-            type: 'interactive',
-            interactive: {
-              type: 'button',
-              body: { text },
-              ...(footer ? { footer: { text: String(footer).slice(0, 60) } } : {}),
-              action: {
-                buttons: options.map((button, index) => ({
-                  type: 'reply',
-                  reply: {
-                    id: String(button?.id || `op_${index + 1}`),
-                    title: String(button?.text || '').slice(0, 20)
-                  }
-                }))
-              }
-            }
-          }
-        );
-        // A Cloud API responde com o id da mensagem aceita; nao ha receipt local
-        // para aguardar. "unconfirmed" fica restrito ao timeout do Baileys.
-        return { ok: true, id: result.messages?.[0]?.id || null, deliveryStatus: 'sent' };
-      }
+      if (metaWa) return metaWa.sendWithOptions(digits, text, options, footer, metadata);
 
       throw missingWhatsAppConfiguration();
     },
-    sendWithOptions: (to, text, buttons, footer) => wa.sendButtons(to, text, buttons, footer)
+    sendWithOptions: (to, text, buttons, footer, metadata) =>
+      wa.sendButtons(to, text, buttons, footer, metadata)
   };
+
+  if (remoto) {
+    // Ordem de preferência: servidor Baileys persistente > ponte legada > Meta.
+    wa.remote = true;
+    wa.getStatus = () => remoto.getStatus();
+    wa.checkNumber = phone => remoto.checkNumber(phone);
+    wa.sendMessage = (to, text, metadata) => remoto.sendMessage(to, text, metadata);
+    wa.sendButtons = (to, text, buttons, footer, metadata) => remoto.sendButtons(to, text, buttons, footer, metadata);
+    wa.sendWithOptions = (to, text, buttons, footer, metadata) => remoto.sendWithOptions(to, text, buttons, footer, metadata);
+  }
+
   bots = {
     getSchedulerStatus: () => 'unsupported',
     startSchedulers: async () => {},

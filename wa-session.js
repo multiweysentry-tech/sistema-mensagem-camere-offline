@@ -12,6 +12,7 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const protocol = require('./wa-protocol');
+const { normalizarContato } = require('./phone-utils');
 const { log } = require('./logger');
 
 const MAX_RECONNECT_ATTEMPTS = 8;
@@ -145,7 +146,8 @@ function createSession(options = {}) {
           qrDataUrl = null;
           lastError = null;
           reconnectAttempts = 0;
-          phoneNumber = String(socket.user?.id || '').split(':')[0].split('@')[0] || null;
+          const connectedId = String(socket.user?.id || '').split(':')[0];
+          phoneNumber = normalizarContato(connectedId) || null;
           emitStatus();
           log('info', 'wa.open', { instanceId, tenantId, phone: phoneNumber });
         } else if (connection === 'close') {
@@ -201,7 +203,7 @@ function createSession(options = {}) {
             direction: message.key.fromMe ? 'out' : 'in'
           };
           try {
-            await db.upsertConversation(jid, message.pushName || jid.split('@')[0], text, timestamp, tenantId, instanceId);
+            await db.upsertConversation(jid, message.pushName || normalizarContato(jid), text, timestamp, tenantId, instanceId);
             const inserted = await db.addMessage(jid, entry, tenantId, instanceId);
             if (!inserted) continue;
             if (!message.key.fromMe) await db.incrementUnread(jid, tenantId, instanceId);
@@ -213,7 +215,7 @@ function createSession(options = {}) {
                 message: entry,
                 conversation: {
                   jid,
-                  name: message.pushName || jid.split('@')[0],
+                  name: message.pushName || normalizarContato(jid),
                   lastMessage: text,
                   lastTime: timestamp
                 }
@@ -311,7 +313,7 @@ function createSession(options = {}) {
       time: new Date().toISOString(),
       direction: 'out'
     };
-    await db.upsertConversation(jid, label || jid.split('@')[0], entry.text, entry.time, tenantId, instanceId);
+    await db.upsertConversation(jid, label || normalizarContato(jid), entry.text, entry.time, tenantId, instanceId);
     const inserted = await db.addMessage(jid, entry, tenantId, instanceId);
     if (inserted && io) {
       io.emit('wa:newMessage', { instanceId, tenantId, jid, message: entry });

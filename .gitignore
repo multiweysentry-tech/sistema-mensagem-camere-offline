@@ -1,6 +1,7 @@
 node_modules/
 .agents/
 auth_info/
+wa-server/session/
 data.json
 *.log
 .env

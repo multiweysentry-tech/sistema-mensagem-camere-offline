@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const http = require('node:http');
 const { test } = require('node:test');
 
@@ -28,7 +29,27 @@ function requestJson(port, pathname, body) {
   });
 }
 
-test('serverless reports interactive delivery accurately without plain-text fallback', async t => {
+function requestRaw(port, pathname, { method = 'GET', headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: pathname,
+      method,
+      headers
+    }, response => {
+      let text = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => { text += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, text }));
+    });
+    request.on('error', reject);
+    if (body !== undefined) request.write(body);
+    request.end();
+  });
+}
+
+test('Vercel Meta provider uses approved templates and reports pending delivery', async t => {
   const environmentKeys = [
     'VERCEL',
     'API_KEY',
@@ -38,6 +59,11 @@ test('serverless reports interactive delivery accurately without plain-text fall
     'PG_PASSWORD',
     'META_WA_ACCESS_TOKEN',
     'META_WA_PHONE_NUMBER_ID',
+    'META_WA_APP_SECRET',
+    'META_WA_VERIFY_TOKEN',
+    'META_WA_TEMPLATE_NAME',
+    'META_WA_TIMEOUT_MS',
+    'WHATSAPP_PROVIDER',
     'WHATSAPP_BRIDGE_URL'
   ];
   const previousEnvironment = new Map(environmentKeys.map(key => [key, process.env[key]]));
@@ -50,21 +76,26 @@ test('serverless reports interactive delivery accurately without plain-text fall
   process.env.PG_PASSWORD = '';
   process.env.META_WA_ACCESS_TOKEN = 'test-token';
   process.env.META_WA_PHONE_NUMBER_ID = 'test-phone-id';
+  process.env.META_WA_APP_SECRET = 'test-app-secret';
+  process.env.META_WA_VERIFY_TOKEN = 'test-verify-token';
+  process.env.META_WA_TEMPLATE_NAME = 'sentry_camera_offline';
+  process.env.META_WA_TIMEOUT_MS = '';
+  process.env.WHATSAPP_PROVIDER = 'meta';
   process.env.WHATSAPP_BRIDGE_URL = '';
 
   const handlerPath = require.resolve('./api/index');
   delete require.cache[handlerPath];
-  const handler = require('./api/index');
   const requests = [];
-  let rejectInteractive = true;
+  let rejectTemplate = true;
   global.fetch = async (url, options) => {
     const body = JSON.parse(options.body);
     requests.push(body);
-    if (body.type === 'interactive' && rejectInteractive) {
-      return new Response(JSON.stringify({ error: { message: 'Interactive message rejected' } }), { status: 400 });
+    if (body.type === 'template' && rejectTemplate) {
+      return new Response(JSON.stringify({ error: { message: 'Template rejected' } }), { status: 400 });
     }
     return new Response(JSON.stringify({ messages: [{ id: 'meta-message-id' }] }), { status: 200 });
   };
+  const handler = require('./api/index');
 
   const server = http.createServer((request, response) => handler(request, response));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -82,6 +113,7 @@ test('serverless reports interactive delivery accurately without plain-text fall
   const status = await requestJson(port, '/api/whatsapp/status');
   assert.equal(status.status, 200);
   assert.equal(status.body.status, 'configured');
+  assert.equal(status.body.provider, 'meta');
   assert.equal(status.body.phone, null);
 
   const consent = await requestJson(port, '/api/consent', {
@@ -92,29 +124,63 @@ test('serverless reports interactive delivery accurately without plain-text fall
 
   const result = await requestJson(port, '/api/whatsapp/send-options', {
     to: '5511999990003',
-    text: 'Escolha uma opção',
+    text: 'Câmera offline:\n• CAM-1',
     buttons: [
       { id: '1', text: 'Estou verificando' },
-      { id: '2', text: 'Preciso de suporte' }
+      { id: '2', text: 'Preciso de suporte' },
+      { id: '3', text: 'Já resolvi' }
     ]
   });
   assert.equal(result.status, 503);
   assert.equal(result.body.codigo, 'WHATSAPP_SEND_FAILED');
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].type, 'interactive');
+  assert.equal(requests[0].type, 'template');
+  assert.equal(requests[0].template.name, 'sentry_camera_offline');
 
-  rejectInteractive = false;
+  rejectTemplate = false;
   const accepted = await requestJson(port, '/api/whatsapp/send-options', {
     to: '5511999990003',
-    text: 'Escolha uma opção',
+    text: 'Câmera offline:\n• CAM-1',
     buttons: [
       { id: '1', text: 'Estou verificando' },
-      { id: '2', text: 'Preciso de suporte' }
+      { id: '2', text: 'Preciso de suporte' },
+      { id: '3', text: 'Já resolvi' }
     ]
   });
-  assert.equal(accepted.status, 200);
-  assert.equal(accepted.body.deliveryStatus, 'sent');
+  assert.equal(accepted.status, 202);
+  assert.equal(accepted.body.deliveryStatus, 'pendente');
   assert.equal(accepted.body.id, 'meta-message-id');
   assert.equal(requests.length, 2);
-  assert.equal(requests[1].type, 'interactive');
+  assert.equal(requests[1].type, 'template');
+
+  const callbackPath = '/api/whatsapp/meta/webhook';
+  const challenge = await requestRaw(
+    port,
+    `${callbackPath}?hub.mode=subscribe&hub.verify_token=test-verify-token&hub.challenge=12345`
+  );
+  assert.equal(challenge.status, 200);
+  assert.equal(challenge.text, '12345');
+
+  const event = JSON.stringify({
+    object: 'whatsapp_business_account',
+    entry: [{
+      changes: [{
+        field: 'messages',
+        value: {
+          metadata: { phone_number_id: 'test-phone-id' },
+          statuses: [{ id: accepted.body.id, status: 'delivered', recipient_id: '5511999990003' }]
+        }
+      }]
+    }]
+  });
+  const signature = `sha256=${crypto.createHmac('sha256', 'test-app-secret').update(event).digest('hex')}`;
+  const callback = await requestRaw(port, callbackPath, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-hub-signature-256': signature },
+    body: event
+  });
+  assert.equal(callback.status, 200);
+  assert.equal(JSON.parse(callback.text).ok, true);
+  const deliveries = await requestJson(port, '/api/whatsapp/delivery');
+  assert.equal(deliveries.body.entregas[0].status, 'entregue');
 });

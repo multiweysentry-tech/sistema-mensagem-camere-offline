@@ -1,6 +1,8 @@
 // Armazenamento em memoria usado apenas no Vercel quando nao ha Postgres remoto configurado.
 // Objetivo: manter o painel e as APIs funcionais sem retornar 500. Os dados nao persistem
 // entre invocacoes/instancias. Defina PG_HOST/PG_PASSWORD com um banco alcancavel para persistir.
+const { normalizarContato } = require('./phone-utils');
+
 const mode = 'memory';
 
 const state = {
@@ -8,6 +10,7 @@ const state = {
   log: [],
   conversations: new Map(),
   messages: new Map(),
+  deliveries: new Map(),
   consent: new Map(),
   blocklist: new Map(),
   templates: new Map(),
@@ -29,6 +32,15 @@ function scopedKey(value, tenantId) {
   if (value === null || value === undefined) return value;
   const t = tenant(tenantId);
   return t === 'default' ? String(value) : `${t}::${String(value)}`;
+}
+
+function canonicalPhone(value) {
+  return normalizarContato(value) || String(value || '');
+}
+
+function phoneKeys(value, tenantId = 'default') {
+  return [...new Set([canonicalPhone(value), String(value || '')].filter(Boolean))]
+    .map(phone => scopedKey(phone, tenantId));
 }
 
 async function init() {
@@ -93,9 +105,10 @@ async function getLog(tenantId = 'default') {
 
 async function hasRecentLog(phone, actions, since, tenantId = 'default') {
   const limit = new Date(since).getTime();
+  const keys = phoneKeys(phone, tenantId);
   return state.log.some(entry =>
     entry.tenant_id === tenant(tenantId) &&
-    entry.responsavel_telefone === phone &&
+    keys.includes(scopedKey(entry.responsavel_telefone, tenantId)) &&
     actions.includes(entry.acao) &&
     !Number.isNaN(new Date(entry.timestamp).getTime()) &&
     new Date(entry.timestamp).getTime() >= limit
@@ -155,13 +168,18 @@ async function markRead(jid, tenantId = 'default') {
 }
 
 async function isBlocked(phone, tenantId = 'default') {
-  const row = state.blocklist.get(scopedKey(phone, tenantId));
-  return Boolean(row && row.tenant_id === tenant(tenantId));
+  return phoneKeys(phone, tenantId).some(key => {
+    const row = state.blocklist.get(key);
+    return Boolean(row && row.tenant_id === tenant(tenantId));
+  });
 }
 
 async function hasConsent(phone, tenantId = 'default') {
-  const row = state.consent.get(scopedKey(phone, tenantId));
-  return Boolean(row && row.tenant_id === tenant(tenantId) && Number(row.opted_in) === 1);
+  const rows = phoneKeys(phone, tenantId)
+    .map(key => state.consent.get(key))
+    .filter(row => row && row.tenant_id === tenant(tenantId));
+  // Se existir registro legado em sentido contrario, o opt-out prevalece.
+  return rows.length > 0 && rows.every(row => Number(row.opted_in) === 1);
 }
 
 async function getConsents(tenantId = 'default') {
@@ -173,7 +191,7 @@ async function getConsents(tenantId = 'default') {
 
 async function setConsent(phone, optedIn, tenantId = 'default') {
   if (typeof optedIn !== 'boolean') throw new TypeError('optedIn deve ser booleano');
-  const key = scopedKey(phone, tenantId);
+  const key = scopedKey(canonicalPhone(phone), tenantId);
   state.consent.set(key, { phone: key, tenant_id: tenant(tenantId), opted_in: optedIn ? 1 : 0, updated_at: new Date().toISOString() });
 }
 
@@ -184,16 +202,17 @@ async function ensureConsent(phone, tenantId = 'default') {
 }
 
 async function block(phone, reason, tenantId = 'default') {
-  const key = scopedKey(phone, tenantId);
+  const key = scopedKey(canonicalPhone(phone), tenantId);
   if (!state.blocklist.has(key)) {
     state.blocklist.set(key, { phone: key, tenant_id: tenant(tenantId), reason: reason || '', created_at: new Date().toISOString() });
   }
 }
 
 async function unblock(phone, tenantId = 'default') {
-  const key = scopedKey(phone, tenantId);
-  const row = state.blocklist.get(key);
-  if (row && row.tenant_id === tenant(tenantId)) state.blocklist.delete(key);
+  for (const key of phoneKeys(phone, tenantId)) {
+    const row = state.blocklist.get(key);
+    if (row && row.tenant_id === tenant(tenantId)) state.blocklist.delete(key);
+  }
 }
 
 async function getBlocklist(tenantId = 'default') {
@@ -406,6 +425,72 @@ async function listJobs(tenantId = 'default', limit = 50) {
     .map(job => ({ ...job }));
 }
 
+async function registerDelivery(entry, tenantId = 'default') {
+  const id = scopedKey(entry.id, tenantId);
+  if (state.deliveries.has(id)) return;
+  const agora = entry.createdAt || new Date().toISOString();
+  state.deliveries.set(id, {
+    id,
+    tenant_id: tenant(tenantId),
+    instance_id: String(entry.instanceId || 'default'),
+    jid: entry.jid || null,
+    camera_ids: (entry.cameraIds || []).join(','),
+    texto: entry.texto || null,
+    status: entry.status || 'pendente',
+    motivo: null,
+    created_at: agora,
+    updated_at: agora
+  });
+}
+
+async function updateDeliveryStatus(id, status, motivo, tenantId = 'default') {
+  const key = scopedKey(id, tenantId);
+  const row = state.deliveries.get(key);
+  if (!row || row.tenant_id !== tenant(tenantId)) return null;
+  row.status = status;
+  row.motivo = motivo || null;
+  row.updated_at = new Date().toISOString();
+  return { ...row };
+}
+
+async function getDeliveries(ids = [], tenantId = 'default') {
+  const chaves = Array.isArray(ids) && ids.length ? ids.map(id => scopedKey(id, tenantId)) : [];
+  return [...state.deliveries.values()]
+    .filter(row => row.tenant_id === tenant(tenantId) && (!chaves.length || chaves.includes(row.id)))
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    .slice(0, 100)
+    .map(row => ({
+      id: row.id,
+      instanceId: row.instance_id,
+      jid: row.jid,
+      cameraIds: row.camera_ids ? row.camera_ids.split(',').filter(Boolean) : [],
+      status: row.status,
+      motivo: row.motivo,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+}
+
+async function findDeliveryByExternalId(id) {
+  const externalId = String(id || '');
+  if (!externalId) return null;
+  const matches = [...state.deliveries.values()]
+    .filter(row => row.id === externalId || row.id.endsWith(`::${externalId}`));
+  if (matches.length !== 1) return null;
+  const [row] = matches;
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    instanceId: row.instance_id,
+    jid: row.jid,
+    cameraIds: row.camera_ids ? String(row.camera_ids).split(',').filter(Boolean) : [],
+    status: row.status,
+    motivo: row.motivo,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 module.exports = {
   mode,
   init,
@@ -422,6 +507,10 @@ module.exports = {
   incrementUnread,
   getMessages,
   addMessage,
+  registerDelivery,
+  updateDeliveryStatus,
+  getDeliveries,
+  findDeliveryByExternalId,
   markRead,
   isBlocked,
   hasConsent,

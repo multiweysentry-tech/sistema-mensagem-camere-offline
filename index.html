@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Painel de câmeras offline – Multiwey Sentry</title>
 <script>if(['127.0.0.1','localhost','::1'].includes(location.hostname))document.write('<script src="/socket.io/socket.io.js"><\/script>');</script>
+<script src="/phone-utils.js"></script>
 <style>
 :root{--bg:#eef1ef;--panel:#fff;--ink:#17211f;--mut:#5d6b68;--line:#d5dcd9;--brand:#0f5c57;--brandfg:#fff;--red:#c8372d;--redbg:#fbe7e5;--amb:#9a6208;--ambbg:#fbf0d9;--blu:#245a9e;--blubg:#e3edf9;--grn:#26734d;--grnbg:#e0f2e8;--wa:#dcf8c6;--chat:#e9e4da;
 box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
@@ -136,9 +137,12 @@ let cams=[],phones={},tab="dash",fv={r:"",p:""},pend=[],storageMode="";
 let loadError="";
 let currentUser=null,authRequired=false,authError="";
 let instances=[],currentInstance="default",diagData=null;
-const DDDS_VALIDOS=new Set(['11','12','13','14','15','16','17','18','19','21','22','24','27','28','31','32','33','34','35','37','38','41','42','43','44','45','46','47','48','49','51','53','54','55','61','62','63','64','65','66','67','68','69','71','73','74','75','77','79','81','82','83','84','85','86','87','88','89','91','92','93','94','95','96','97','98','99']);
-function extrairDDD(entrada){let num=String(entrada).split('@')[0].replace(/\D/g,'').replace(/^0+/,'');if(num.startsWith('55')&&(num.length===12||num.length===13))num=num.slice(2);if(num.length!==10&&num.length!==11)return null;const ddd=num.slice(0,2);return DDDS_VALIDOS.has(ddd)?ddd:null}
-async function checkWaNumber(phone){const digits=String(phone||"").replace(/\D/g,"");if(!extrairDDD(digits))return {exists:false,error:"DDD invalido"};try{return await apiRequest("/api/whatsapp/check/"+encodeURIComponent(digits))}catch(e){return {exists:null,error:e.message}}}
+let deliveries={},deliveryByCamera={},deliveryTimeout=15;
+// Regra de telefone unica, carregada de /phone-utils.js (mesmo código do backend).
+const PU=globalThis.PhoneUtils;
+function extrairDDD(entrada){return PU.extrairDDD(entrada)}
+function phoneKey(entrada){return PU.chaveComparacaoTelefone(entrada)||PU.normalizarContato(entrada)}
+async function checkWaNumber(phone){const normal=PU.normalizarTelefone(phone);if(!normal.valido)return {exists:false,error:"DDD invalido"};try{return await apiRequest("/api/whatsapp/check/"+encodeURIComponent(normal.internacional))}catch(e){return {exists:null,error:e.message}}}
 async function apiRequest(url,options={}){
  const response=await fetch(url,{credentials:"same-origin",...options});
  let data={};
@@ -173,7 +177,7 @@ async function doLogout(){
  currentUser=null;authRequired=true;instances=[];draw();
 }
 async function afterLogin(){
- await Promise.allSettled([loadFromApi(),loadInstances(),loadConversations(),loadWaStatus(),loadDiag()]);
+ await Promise.allSettled([loadFromApi(),loadInstances(),loadConversations(),loadWaStatus(),loadDeliveries(),loadDiag()]);
  draw();
 }
 async function loadFromApi(){
@@ -215,7 +219,8 @@ function hasRecentAttempt(camera,at=now()){
  return (Number(camera.tentativas)||0)>0&&Number.isFinite(timestamp)&&timestamp<=at&&at-timestamp<24*H;
 }
 function showSendResult(result,message){
- if(result?.deliveryStatus==="unconfirmed"){toast("O WhatsApp aceitou o envio, mas não confirmou a entrega. Confira a Central WhatsApp e o aparelho do cliente antes de reenviar.",10000);return}
+ if(result?.deliveryStatus==="pendente"){toast("Mensagem na fila do WhatsApp. O status real (entregue, lida ou falha) aparecerá no cartão do responsável.",9000);return}
+  if(result?.deliveryStatus==="unconfirmed"){toast("O WhatsApp aceitou o envio, mas não confirmou a entrega. Confira a Central WhatsApp e o aparelho do cliente antes de reenviar.",10000);return}
  if(result?.deliveryStatus==="inProgress"){toast("Já existe um envio em andamento para este responsável. Aguarde o resultado.");return}
  if(result?.deliveryStatus==="recent"){toast("Já existe uma tentativa nas últimas 24 horas. Confira a conversa antes de tentar novamente.",8000);return}
  if(result?.deliveryStatus==="none"){toast("Não há câmeras pendentes para enviar.");return}
@@ -233,7 +238,7 @@ async function persistGroupStatus(resp,status,fromStatuses){
 async function sendGroupMessage(resp){
  const group=cams.filter(c=>c.resp===resp&&["offline","analisando"].includes(c.status));
  if(!group.length)return {deliveryStatus:"none"};
- const phone=String(group[0].responsavel_telefone||"").replace(/\D/g,"");
+ const phone=PU.normalizarContato(group[0].responsavel_telefone);
  if(sendsInProgress.has(phone))return {deliveryStatus:"inProgress"};
  sendsInProgress.add(phone);
  try{
@@ -244,9 +249,17 @@ async function sendGroupMessage(resp){
  if(!consent.opted_in)throw new Error("Este contato ainda não autorizou mensagens automáticas");
  const cameras=group.map(c=>`• ${c.camera_nome||c.id}`).join("\n");
  const text=`Olá, ${resp}!\nO Sentry identificou estas câmeras offline:\n${cameras}\n\nComo prefere prosseguir? Toque em uma opção abaixo para atualizar o status.`;
- const result=await apiRequest("/api/whatsapp/send-options",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:phone,text,footer:"Escolha uma opção. PARAR encerra as mensagens."})});
+ const result=await apiRequest("/api/whatsapp/send-options",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:phone,text,footer:"Escolha uma opção. PARAR encerra as mensagens.",instanceId:currentInstance,cameraIds:group.map(c=>c.id)})});
  const timestamp=new Date().toISOString();
- if(result.deliveryStatus==="unconfirmed"){
+ if(result.deliveryStatus==="pendente"){
+   const entrega={id:result.id||`fila_${Date.now()}`,cameraIds:group.map(c=>c.id),status:"pendente",statusExibido:"pendente",createdAt:timestamp};
+   deliveries[entrega.id]=entrega;
+   for(const camera of group){deliveryByCamera[camera.id]=entrega;await apiRequest(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({ultima_cobranca:timestamp})})}
+   await apiRequest("/api/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({timestamp,camera_id:group.map(c=>c.id).join(","),camera_nome:group.map(c=>c.camera_nome).join(", "),responsavel_telefone:phone,acao:"ENVIO_AGUARDANDO_CONFIRMACAO",detalhe:`Mensagem ${entrega.id} enfileirada; status real virá pelo webhook.`,status_anterior:[...new Set(group.map(c=>c.status))].join(","),status_novo:[...new Set(group.map(c=>c.status))].join(",")})});
+   await Promise.allSettled([loadFromApi(),loadDeliveries()]);
+   return result;
+  }
+  if(result.deliveryStatus==="unconfirmed"){
   for(const camera of group)await apiRequest(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({tentativas:(Number(camera.tentativas)||0)+1,ultima_cobranca:timestamp})});
   await apiRequest("/api/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({timestamp,camera_id:group.map(c=>c.id).join(","),camera_nome:group.map(c=>c.camera_nome).join(", "),responsavel_telefone:phone,acao:"ENVIO_SEM_CONFIRMACAO",detalhe:`WhatsApp aceitou o envio, mas nao confirmou a entrega. ID: ${result.id||"indisponivel"}`,status_anterior:[...new Set(group.map(c=>c.status))].join(","),status_novo:[...new Set(group.map(c=>c.status))].join(",")})});
   await loadFromApi();
@@ -269,7 +282,7 @@ const A={
  async confirm(r){try{await persistGroupStatus(r,"Resolvido",["validacao"]);toast("Resolução confirmada")}catch(e){toast(`Falha: ${e.message}`)}},
  async resend(r){try{showSendResult(await sendGroupMessage(r),"WhatsApp reenviado")}catch(e){showSendError(e)}},
  async reopen(r){try{await persistGroupStatus(r,"Pendente",["resolvido"]);toast("Câmera reaberta")}catch(e){toast(`Falha: ${e.message}`)}},
- async chat(r){const phone=String(phones[r]||"").replace(/\D/g,"");if(!phone)return toast("Responsável sem telefone cadastrado");const conversation=waConversations.find(item=>String(item.jid||"").startsWith(phone+"@"));const jid=conversation?.jid||`${phone}@s.whatsapp.net`;await loadMessages(jid);go("whatsapp")},
+ async chat(r){const key=phoneKey(phones[r]);if(!key)return toast("Responsável sem telefone cadastrado");const phone=PU.normalizarContato(phones[r]);const conversation=waConversations.find(item=>phoneKey(item.jid)===key);const jid=conversation?.jid||`${phone}@s.whatsapp.net`;await loadMessages(jid);go("whatsapp")},
  async done(r){try{await persistGroupStatus(r,"Resolvido",["aguardando"]);toast("Atendimento encerrado")}catch(e){toast(`Falha: ${e.message}`)}}
 };
 const cleanText=value=>String(value??"")
@@ -288,6 +301,7 @@ const esc=value=>cleanText(value).replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&l
 const q=esc;
 function btn(cls,a,r,t){return `<button class="btn ${cls}" data-a="${a}" data-r="${q(r)}">${t}</button>`}
 function card(st,r,list){
+ const entrega=deliveryBadge(list);
  const ids=list.map(c=>`<span class="chip">${esc(c.camera_nome||c.id)}</span>`).join("");
  let head=`<div class="gh"><b>${esc(r)}</b><span>${esc(phones[r])} · ${list.length} ${list.length>1?"câmeras":"câmera"}</span></div><div class="chips">${ids}</div>`,body="";
  if(st==="offline"){const old=Math.min(...list.map(c=>c.since)),recent=list.some(hasRecentAttempt);body=`<div class="act"><span class="tag r">offline ${ago(old).replace("há ","há ")}</span>${recent?`<span class="tag a">tentativa recente; verifique antes de reenviar</span>`:btn("p s","send",r,"Enviar WhatsApp")}${btn("s","more",r,"+ Câmera")}</div>`}
@@ -297,7 +311,8 @@ function card(st,r,list){
  if(st==="aguardando")body=`<div class="act"><span class="tag a">na fila</span>${btn("p s","chat",r,"Abrir conversa WhatsApp")}${btn("s","done",r,"Encerrar e dar baixa")}</div>`;
  if(st==="validacao")body=`<div class="act"><span class="tag a">aguardando conferência</span>${btn("p s","confirm",r,"Confirmar resolução")}${btn("s","tec",r,"Encaminhar para suporte")}</div>`;
  if(st==="resolvido"){const t=Math.max(...list.map(c=>c.doneAt)),dur=Math.round((t-Math.min(...list.map(c=>c.since)))/H);body=`<div class="act"><span class="tag g">resolvido ${ago(t)}</span><span class="sim">${dur} h até a solução</span>${btn("s","reopen",r,"Reabrir (Sentry ainda offline)")}</div>`}
- return `<div class="grp ${st}">${head}${body}</div>`
+   if(entrega&&["offline","notificado","analisando"].includes(st))body=`<div class="act"><span class="sim">entrega:</span>${entrega}</div>`+body;
+  return `<div class="grp ${st}">${head}${body}</div>`
 }
 function preview(){
  const g=groups("offline"),r=Object.keys(g)[0]||"Mercado Boa Vista",l=(g[r]||[{id:"CAM-0412"},{id:"CAM-0413"}]).map(c=>"• "+(c.camera_nome||c.id)).join("\n");
@@ -365,6 +380,7 @@ function diagView(){
 }
 function instancesView(){
  const T=TABS.find(x=>x.k===tab);
+ if(waState.provider==="meta")return `<h1>Instâncias WhatsApp</h1><p class="lead">${T.d}</p><div class="note">A API oficial Meta usa o número e o Phone Number ID configurados no servidor. Ela não usa QR nem oferece instâncias locais nesta tela.</div>`;
  const list=instances.map(i=>{
   const active=i.instanceId===currentInstance;
   const status=i.status||"disconnected";
@@ -373,13 +389,14 @@ function instancesView(){
   <div class="sub" style="padding:5px 0 0">${esc(i.instanceId)} · ${esc(i.phone||"sem número")}${i.error?` · ${esc(i.error)}`:""}</div>
   <div class="act" style="margin-top:10px">
    <button class="btn s" onclick="selectInstance('${q(i.instanceId)}')">Selecionar</button>
-   ${status==="open"?`<button class="btn s" onclick="instanceAction('disconnect','${q(i.instanceId)}')">Desconectar</button>`:`<button class="btn s p" onclick="instanceAction('connect','${q(i.instanceId)}')">Conectar</button><button class="btn s" onclick="instanceAction('qr','${q(i.instanceId)}')">Novo QR</button>`}
-   <button class="btn s" onclick="instanceAction('delete','${q(i.instanceId)}')">Excluir sessão</button>
+   ${waState.remote?"":status==="open"?`<button class="btn s" onclick="instanceAction('disconnect','${q(i.instanceId)}')">Desconectar</button>`:`<button class="btn s p" onclick="instanceAction('connect','${q(i.instanceId)}')">Conectar</button><button class="btn s" onclick="instanceAction('qr','${q(i.instanceId)}')">Novo QR</button>`}
+   ${waState.remote?"":`<button class="btn s" onclick="instanceAction('delete','${q(i.instanceId)}')">Excluir sessão</button>`}
   </div>
   ${active&&i.qr?`<p style="margin:12px 0 4px"><img src="${esc(i.qr)}" alt="QR Code" style="max-width:200px;border:1px solid var(--line);border-radius:8px"></p><p class="sub">Escaneie no WhatsApp → Dispositivos conectados → Conectar dispositivo.</p>`:""}
   </div>`;
  }).join("")||`<div class="empty">Nenhuma instância cadastrada.</div>`;
  return `<h1>Instâncias WhatsApp</h1><p class="lead">${T.d}</p>
+ ${waState.remote?`<div class="note">A conexão usa um servidor Baileys remoto. Gere e escaneie o QR no próprio servidor (terminal ou endpoint protegido <code>/qr</code>); a conexão e as sessões não podem ser controladas por esta tela.${waState.error?` <span>${esc(waState.error)}</span>`:""}</div>`:""}
  <div class="box" style="max-width:520px;margin-bottom:16px"><h2>Nova instância</h2>
   <label>Identificador (ex: filial_2)</label><input id="inst-new-id" placeholder="filial_2">
   <div class="act" style="margin-top:10px"><button class="btn p" onclick="createInstance()">Criar instância</button></div>
@@ -387,7 +404,10 @@ function instancesView(){
  ${list}`;
 }
 let waState={status:"disconnected",qr:null,phone:null};
-async function loadWaStatus(){try{const s=await apiRequest("/api/whatsapp/status?instanceId="+encodeURIComponent(currentInstance));if(JSON.stringify(s)!==JSON.stringify(waState)){waState=s;if(Array.isArray(s.instances))instances=s.instances;if(tab==="whatsapp"||tab==="instances")draw()}}catch(e){}}
+async function loadWaStatus(){try{const s=await apiRequest("/api/whatsapp/status?instanceId="+encodeURIComponent(currentInstance));if(JSON.stringify(s)!==JSON.stringify(waState)){waState=s;if(Array.isArray(s.instances))instances=s.instances;if(tab==="whatsapp"||tab==="instances"||tab==="offline")draw()}}catch(e){}}
+async function loadDeliveries(){try{const data=await apiRequest("/api/whatsapp/delivery");deliveryTimeout=Number(data.timeoutMinutos)||15;const mapa={},porCam={};(data.entregas||[]).forEach(d=>{mapa[d.id]=d;(d.cameraIds||[]).forEach(id=>{const atual=porCam[id];if(!atual||d.statusExibido==="falhou"||(atual.statusExibido!=="falhou"&&["entregue","lida"].includes(d.statusExibido)))porCam[id]=d})});if(JSON.stringify(mapa)!==JSON.stringify(deliveries)){deliveries=mapa;deliveryByCamera=porCam;if(tab==="offline")draw()}}catch(e){}}
+function healthBanner(){if(waState.provider==="meta")return `<div class="note" style="border-left:4px solid var(--grn)"><b>WhatsApp Cloud API oficial configurada · entregas e respostas dependem do webhook HTTPS da Meta</b></div>`;const st=waState.remoteStatus||waState.status;const ok=["open","conectado"].includes(st),qr=["qr","aguardando_qr"].includes(st);const texto=ok?"WhatsApp conectado · confirmações de entrega ativas":qr?"WhatsApp aguardando QR Code: escanee no servidor Baileys.":"WhatsApp desconectado: alertas ficarão na fila, sem envio.";const cor=ok?"var(--grn)":qr?"var(--amb)":"var(--red)";return `<div class="note" style="border-left:4px solid ${cor}"><b>${texto}</b>${waState.error?` <span class="sim">${esc(waState.error)}</span>`:""}</div>`}
+function deliveryBadge(list){const statuses=list.map(c=>deliveryByCamera[c.id]).filter(Boolean).map(d=>d.statusExibido||d.status);if(!statuses.length)return "";const rank={pendente:1,enviada:2,entregue:3,lida:4,falhou:5,sem_confirmacao:5};const atual=statuses.reduce((a,b)=>(rank[b]||0)>(rank[a]||0)?b:a,statuses[0]);const rotulos={pendente:"na fila",enviada:"enviada",entregue:"entregue ✓",lida:"lida ✓",falhou:"falhou",sem_confirmacao:"sem confirmação"};const cores={pendente:"a",enviada:"b",entregue:"g",lida:"g",falhou:"r",sem_confirmacao:"r"};return `<span class="tag ${cores[atual]||"a"}">${rotulos[atual]||esc(atual)}</span>`}
 let waConversations=[];
 let waActiveJid=null;
 let waMessages=[];
@@ -412,7 +432,7 @@ async function waConnect(){try{await apiRequest("/api/whatsapp/connect",{method:
 async function waDisconnect(){try{await apiRequest("/api/whatsapp/disconnect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instanceId:currentInstance})});waError="";toast("Desconectado")}catch(e){toast(`Falha ao desconectar: ${e.message}`)}await loadWaStatus();draw()}
 function waView(){
  const T=TABS.find(x=>x.k===tab);
- if(waState.status==="configured")return `<h1>Central WhatsApp</h1><div class="box" style="max-width:560px"><h2>API configurada</h2><p class="lead">O envio está configurado no servidor, mas este painel serverless não confirma conexão, entrega ou respostas, nem mantém conversas atualizadas.</p><p class="sub" style="padding:10px 0">Para conexão por QR, conversas em tempo real e bots locais, use o painel no computador ou servidor persistente onde o WhatsApp está conectado.</p></div>`;
+ if(waState.status==="configured"&&waState.provider!=="meta")return `<h1>Central WhatsApp</h1><div class="box" style="max-width:560px"><h2>API configurada</h2><p class="lead">O envio está configurado no servidor, mas este painel serverless não confirma conexão, entrega ou respostas, nem mantém conversas atualizadas.</p><p class="sub" style="padding:10px 0">Para conexão por QR, conversas em tempo real e bots locais, use o painel no computador ou servidor persistente onde o WhatsApp está conectado.</p></div>`;
  if(waState.status==="unsupported")return `<h1>Central WhatsApp</h1>
  <div class="box" style="max-width:560px">
   <h2>Use o painel local</h2>
@@ -423,6 +443,15 @@ function waView(){
  </div>`;
  const convList = waConversations.map(c=>`<button class="grp" data-open-jid="${q(c.jid)}" style="cursor:pointer;margin-bottom:8px;width:100%;text-align:left;color:var(--ink)"><div class="gh"><b>${esc(c.name||c.jid)}</b><span>${c.unread?`<span class="tag r">${c.unread} não lida(s)</span>`:""}</span></div><div class="sub" style="padding:4px 0 0">${esc((c.lastMessage||"").slice(0,60))}</div></button>`).join("") || `<div class="empty">Nenhuma conversa ainda.</div>`;
  const chat = waActiveJid ? `<div class="box"><h2>${esc(waActiveJid)}</h2><div class="chat" style="max-height:320px">${waMessages.map(m=>`<div class="m ${m.direction==='out'?'tec':''}"><small>${m.direction==='out'?'Você':'Contato'} ${new Date(m.time).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})}</small>${esc(m.text)}</div>`).join("")}</div><div class="send"><input id="wa-input" placeholder="Escreva uma mensagem..." onkeydown="if(event.key==='Enter')sendWaMsg()"><button class="btn p" onclick="sendWaMsg()">Enviar</button></div></div>` : `<div class="empty">Selecione uma conversa para responder.</div>`;
+ const connectionControls=waState.provider==="meta"
+  ? `<p class="lead">API oficial WhatsApp Cloud configurada no servidor. Esta integração não usa QR Code. Entregas e respostas aparecem após a Meta enviar o webhook para este servidor.</p>`
+  : waState.remote
+  ? `<p class="lead">Status no servidor Baileys: <b>${esc(waState.remoteStatus||waState.status)}</b></p><p class="sub" style="padding:10px 0">O painel não pode iniciar a sessão nem exibir o QR remoto. Gere o QR no terminal do servidor ou acesse o endpoint protegido <code>/qr</code> com a chave de API do servidor.${waState.error?`<br>${esc(waState.error)}`:""}</p>`
+  : waState.status==="open"
+    ? `<p class="lead">Conectado: <b>${waState.phone}</b></p><button class="btn" onclick="waDisconnect()">Desconectar</button>`
+    : waState.qr
+      ? `<p class="lead">Escaneie o QR Code com o WhatsApp:</p><img src="${esc(waState.qr)}" alt="QR Code" style="max-width:200px;border:1px solid var(--line);border-radius:8px"><p class="sub" style="padding:10px 0 0">Aguardando leitura...</p><button class="btn" onclick="instanceAction('qr',currentInstance)">Gerar novo QR</button>`
+      : `<p class="lead">Desconectado. Clique para gerar o QR Code:</p><button class="btn p" onclick="waConnect()">Conectar WhatsApp</button>`;
  return `<h1>Central WhatsApp</h1><p class="lead">${T.d}</p>
  <div class="kpis">
   <div class="kpi"><b>${waState.status}</b><span>status da conexão</span></div>
@@ -441,11 +470,7 @@ function waView(){
      <select id="wa-instance" onchange="selectInstance(this.value)">${instances.map(i=>`<option value="${q(i.instanceId)}" ${i.instanceId===currentInstance?"selected":""}>${esc(i.label||i.instanceId)}</option>`).join("")||`<option value="default">default</option>`}</select>
     <h2>Conexão por QR Code</h2>
     ${waError||waState.error?`<p class="note">${esc(waError||waState.error)}</p>`:""}
-    ${waState.status==="open"
-      ? `<p class="lead">Conectado: <b>${waState.phone}</b></p><button class="btn" onclick="waDisconnect()">Desconectar</button>`
-      : waState.qr
-        ? `<p class="lead">Escaneie o QR Code com o WhatsApp:</p><img src="${esc(waState.qr)}" alt="QR Code" style="max-width:200px;border:1px solid var(--line);border-radius:8px"><p class="sub" style="padding:10px 0 0">Aguardando leitura...</p><button class="btn" onclick="instanceAction('qr',currentInstance)">Gerar novo QR</button>`
-        : `<p class="lead">Desconectado. Clique para gerar o QR Code:</p><button class="btn p" onclick="waConnect()">Conectar WhatsApp</button>`}
+    ${connectionControls}
    </div>
    ${chat}
   </div>
@@ -514,13 +539,13 @@ let consentList=[];
 async function loadBotCfg(){try{botCfg=await apiRequest("/api/bots/config");consentList=await apiRequest("/api/consents");if(tab==="botconfig")draw()}catch(e){toast(`Falha ao carregar configuração: ${e.message}`)}}
 async function saveBotCfg(){const form=document.getElementById("botcfg-form");const data={};new FormData(form).forEach((v,k)=>{data[k]=v});try{await apiRequest("/api/bots/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});toast("Configuração salva");await loadBotCfg()}catch(e){toast(`Falha ao salvar: ${e.message}`)}}
 async function setContactConsent(phone,optedIn){if(!confirm(optedIn?"Confirma que este contato autorizou receber mensagens automáticas?":"Confirma a remoção da autorização?"))return;try{await apiRequest("/api/consent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone,opted_in:optedIn})});toast(optedIn?"Consentimento registrado":"Consentimento removido");await loadBotCfg()}catch(e){toast(`Falha ao atualizar consentimento: ${e.message}`)}}
-async function runBot(kind){if(!confirm("O bot poderá enviar mensagens reais aos contatos autorizados. Deseja continuar?"))return;try{const result=await apiRequest(`/api/bots/${kind}/run`,{method:"POST"});const sent=result.result?.sent||0,failed=result.result?.failed||0,unconfirmed=result.result?.unconfirmed||0;toast(failed||unconfirmed?`${sent} confirmado(s), ${unconfirmed} sem confirmação, ${failed} falha(s). Confira WhatsApp e logs.`:`Bot concluído: ${sent} envio(s)`)}catch(e){toast(`Falha ao executar bot: ${e.message}`)}}
+async function runBot(kind){if(!confirm("O bot poderá enviar mensagens reais aos contatos autorizados. Deseja continuar?"))return;try{const result=await apiRequest(`/api/bots/${kind}/run`,{method:"POST"});const sent=result.result?.sent||0,failed=result.result?.failed||0,unconfirmed=result.result?.unconfirmed||0,pending=result.result?.pending||0;toast(failed||unconfirmed||pending?`${sent} confirmado(s), ${pending} aguardando entrega, ${unconfirmed} sem confirmação, ${failed} falha(s). Confira WhatsApp e logs.`:`Bot concluído: ${sent} envio(s)`)}catch(e){toast(`Falha ao executar bot: ${e.message}`)}}
 function botCfgView(){
  const T=TABS.find(x=>x.k===tab);
  const cfg=botCfg||{};
  const fields=[{k:'billing_hour',l:'Hora do aviso de câmeras offline (0-23)'},{k:'maintenance_hour',l:'Hora do lembrete (0-23)'},{k:'auto_mode',l:'Modo automático (true/false)'},{k:'max_attempts',l:'Limite de tentativas'},{k:'business_hours_start',l:'Início horário comercial'},{k:'business_hours_end',l:'Fim horário comercial'}];
  const inputs=fields.map(f=>`<label>${f.l}</label><input name="${f.k}" value="${esc(cfg[f.k]||'')}" form="botcfg-form">`).join("");
- const contactList=cams.filter((camera,index,list)=>list.findIndex(item=>item.responsavel_telefone===camera.responsavel_telefone)===index).map(camera=>{const phone=String(camera.responsavel_telefone||"").replace(/\D/g,"");const optedIn=consentList.some(item=>item.phone===phone&&item.opted_in);return `<div class="act" style="justify-content:space-between;border-top:1px solid var(--line);padding:8px 0"><span>${esc(camera.responsavel_nome)} · ${esc(phone)}</span><button class="btn s" onclick="setContactConsent('${q(phone)}',${!optedIn})">${optedIn?"Desativar bot":"Registrar consentimento"}</button></div>`}).join("")||`<div class="empty">Cadastre responsáveis para gerenciar consentimentos.</div>`;
+ const contactList=cams.filter((camera,index,list)=>list.findIndex(item=>phoneKey(item.responsavel_telefone)===phoneKey(camera.responsavel_telefone))===index).map(camera=>{const key=phoneKey(camera.responsavel_telefone);const phone=PU.normalizarContato(camera.responsavel_telefone);const optedIn=consentList.some(item=>phoneKey(item.phone)===key&&item.opted_in);return `<div class="act" style="justify-content:space-between;border-top:1px solid var(--line);padding:8px 0"><span>${esc(camera.responsavel_nome)} · ${esc(phone)}</span><button class="btn s" onclick="setContactConsent('${q(phone)}',${!optedIn})">${optedIn?"Desativar bot":"Registrar consentimento"}</button></div>`}).join("")||`<div class="empty">Cadastre responsáveis para gerenciar consentimentos.</div>`;
  return `<h1>Configuração dos Bots</h1><p class="lead">${T.d}</p>
  <div class="box" style="max-width:520px">
   <form id="botcfg-form">${inputs}</form>
@@ -530,9 +555,9 @@ function botCfgView(){
 }
 let blockData={blocklist:[],consent:[]};
 async function loadBlockData(){ try{ blockData.blocklist=await apiRequest("/api/blocklist"); if(tab==="blocklist")draw(); }catch(e){toast(`Falha ao carregar bloqueios: ${e.message}`)} }
-async function blockPhone(){ const ph=document.getElementById("blk-phone").value.trim(); const reason=document.getElementById("blk-reason").value.trim(); if(!ph) return toast("Informe o telefone"); try{await apiRequest("/api/blocklist",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone:ph,reason})});toast("Bloqueado");await loadBlockData()}catch(e){toast(`Falha ao bloquear: ${e.message}`)} }
-async function unblockPhone(ph){ try{await apiRequest("/api/blocklist/"+encodeURIComponent(ph),{method:"DELETE"});toast("Desbloqueado");await loadBlockData()}catch(e){toast(`Falha ao desbloquear: ${e.message}`)} }
-async function setConsentUI(){ const ph=document.getElementById("cons-phone").value.trim(); const opt=document.getElementById("cons-opt").value; if(!ph) return toast("Informe o telefone"); try{await apiRequest("/api/consent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone:ph,opted_in:opt==="1"})});toast("Consentimento atualizado");await loadBlockData()}catch(e){toast(`Falha ao atualizar: ${e.message}`)} }
+async function blockPhone(){ const ph=PU.normalizarContato(document.getElementById("blk-phone").value); const reason=document.getElementById("blk-reason").value.trim(); if(!ph) return toast("Informe o telefone"); try{await apiRequest("/api/blocklist",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone:ph,reason})});toast("Bloqueado");await loadBlockData()}catch(e){toast(`Falha ao bloquear: ${e.message}`)} }
+async function unblockPhone(ph){ try{await apiRequest("/api/blocklist/"+encodeURIComponent(PU.normalizarContato(ph)),{method:"DELETE"});toast("Desbloqueado");await loadBlockData()}catch(e){toast(`Falha ao desbloquear: ${e.message}`)} }
+async function setConsentUI(){ const ph=PU.normalizarContato(document.getElementById("cons-phone").value); const opt=document.getElementById("cons-opt").value; if(!ph) return toast("Informe o telefone"); try{await apiRequest("/api/consent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone:ph,opted_in:opt==="1"})});toast("Consentimento atualizado");await loadBlockData()}catch(e){toast(`Falha ao atualizar: ${e.message}`)} }
 function blockView(){
  const T=TABS.find(x=>x.k===tab);
  const bl=blockData.blocklist||[];
@@ -572,7 +597,7 @@ function view(){
  const kp=`<div class="kpis"><div class="kpi"><b>${cams.filter(c=>c.status!=="resolvido").length}</b><span>câmeras offline</span></div><div class="kpi"><b>${new Set(cams.filter(c=>c.status!=="resolvido").map(c=>c.resp)).size}</b><span>responsáveis</span></div><div class="kpi"><b>${cams.filter(c=>c.status==="resolvido").length}</b><span>resolvidas</span></div></div>`;
  let list=ks.length?ks.map(r=>card(tab,r,g[r])).join(""):`<div class="empty">Nada por aqui. ${tab==="offline"?"Cadastre uma câmera ao lado para começar.":"Quando houver movimento, os grupos aparecem nesta aba."}</div>`;
  const side=tab==="offline"?`<div>${form()}<div style="height:16px"></div>${preview()}</div>`:"";
- return `<h1>${T.t}</h1><p class="lead">${T.d}</p>${kp}${tab==="offline"?`<div class="two"><div>${list}</div>${side}</div>`:list}`
+ return `<h1>${T.t}</h1><p class="lead">${T.d}</p>${tab==="offline"?healthBanner():""}${kp}${tab==="offline"?`<div class="two"><div>${list}</div>${side}</div>`:list}`
 }
 function dash(){
  const counts={};
@@ -618,7 +643,7 @@ const removeTemplate=e.target.closest("[data-template-delete]");if(removeTemplat
   if(!pend.length||!r2||!p)return toast("Informe o responsável, o WhatsApp e ao menos uma câmera");
   const novos=pend.filter(i=>!cams.some(c=>c.id===i&&c.status!=="resolvido"));
   if(!novos.length)return toast("Essas câmeras já estão cadastradas");
-  const digits=p.replace(/\D/g,"");
+  const digits=PU.normalizarContato(p);
   const numberCheck=await checkWaNumber(digits);
   if(numberCheck.exists===false)return toast(numberCheck.error?`${numberCheck.error}: ${digits}`:`Numero ${digits} nao existe no WhatsApp. Confira o DDD antes de cadastrar.`);
   if(numberCheck.exists===null)toast(`Nao foi possivel validar o numero no WhatsApp: ${numberCheck.error}. Continuando...`);
@@ -631,6 +656,7 @@ $("#theme").onclick=()=>{const d=document.documentElement,dark=getComputedStyle(
 $("#logout").onclick=doLogout;
 setInterval(()=>{if(tab==="analisando")draw()},60000);
 setInterval(()=>{if(tab==="whatsapp"&&(waState.status==="qr"||waState.status==="connecting"))loadWaStatus()},3000);
+setInterval(()=>{if(tab==="offline"){loadWaStatus();loadDeliveries()}},7000);
 const initial=(location.hash||"").replace("#","");
 if(TABS.some(t=>t.k===initial))tab=initial;
 draw();

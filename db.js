@@ -1,6 +1,6 @@
 const { Pool } = require('pg');
 const { getConfig } = require('./db-config');
-const { normalizarNumeroWhatsapp } = require('./phone-utils');
+const { normalizarNumeroWhatsapp, normalizarContato } = require('./phone-utils');
 const { log } = require('./logger');
 
 const config = getConfig();
@@ -13,7 +13,7 @@ const pool = new Pool({
 pool.on('error', error => log('error', 'db.idle_error', { error }));
 
 const DATA_TABLES = [
-  'cameras', 'log', 'conversations', 'messages', 'consent',
+  'cameras', 'log', 'conversations', 'messages', 'message_delivery', 'consent',
   'blocklist', 'message_templates', 'bot_config', 'app_migrations'
 ];
 
@@ -27,6 +27,17 @@ function scopedKey(value, tenantId) {
   if (value === null || value === undefined) return value;
   const t = tenant(tenantId);
   return t === 'default' ? String(value) : `${t}::${String(value)}`;
+}
+
+// Chave canonica de gravacao e chaves legadas aceitas na leitura. Assim um
+// cadastro antigo salvo sem DDI continua encontrando seu consentimento.
+function canonicalPhone(value) {
+  return normalizarContato(value) || String(value || '');
+}
+
+function phoneKeys(value, tenantId = 'default') {
+  return [...new Set([canonicalPhone(value), String(value || '')].filter(Boolean))]
+    .map(phone => scopedKey(phone, tenantId));
 }
 
 async function init() {
@@ -53,6 +64,11 @@ async function init() {
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default', instance_id TEXT NOT NULL DEFAULT 'default',
       jid TEXT REFERENCES conversations(jid) ON DELETE CASCADE,
       direction TEXT, text TEXT, time TEXT, status TEXT DEFAULT 'pending'
+    );
+    CREATE TABLE IF NOT EXISTS message_delivery (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default', instance_id TEXT NOT NULL DEFAULT 'default',
+      jid TEXT, camera_ids TEXT, texto TEXT, status TEXT NOT NULL DEFAULT 'pendente',
+      motivo TEXT, created_at TEXT, updated_at TEXT
     );
     CREATE TABLE IF NOT EXISTS consent (
       phone TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
@@ -108,6 +124,7 @@ async function init() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_cameras_tenant ON cameras(tenant_id, status)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_log_tenant_action ON log(tenant_id, acao, timestamp)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_tenant_time ON messages(tenant_id, time)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_delivery_tenant_time ON message_delivery(tenant_id, created_at DESC)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(status, run_at)');
 
   const tpl = await pool.query("SELECT id FROM message_templates WHERE id='cobranca_padrao' AND tenant_id='default'");
@@ -164,7 +181,7 @@ async function upsertCamera(cam, tenantId = 'default') {
     await pool.query(`UPDATE cameras SET camera_nome=$1,local=$2,responsavel_nome=$3,responsavel_telefone=$4,email=$5,status=$6,tentativas=$7,ultima_cobranca=$8,data_resolucao=$9,observacoes=$10 WHERE id=$11 AND tenant_id=$12`,
       [...values, id, t]);
   } else {
-    await pool.query(`INSERT INTO cameras (id,tenant_id,camera_nome,local,responsavel_nome,responsavel_telefone,email,status,tentativas,ultima_cobranca,data_resolucao,observacoes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+    await pool.query(`INSERT INTO cameras (id,tenant_id,camera_nome,local,responsavel_nome,responsavel_telefone,email,status,tentativas,ultima_cobranca,data_resolucao,observacoes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [id, t, ...values]);
   }
 }
@@ -198,12 +215,12 @@ async function getLog(tenantId = 'default') {
 async function hasRecentLog(phone, actions, since, tenantId = 'default') {
   const result = await pool.query(
     `SELECT 1 FROM log
-      WHERE tenant_id=$1 AND responsavel_telefone=$2
+      WHERE tenant_id=$1 AND responsavel_telefone=ANY($2::text[])
         AND acao=ANY($3::text[])
         AND timestamp ~ '^\\d{4}-\\d{2}-\\d{2}T'
         AND timestamp::timestamptz >= $4::timestamptz
       LIMIT 1`,
-    [tenant(tenantId), phone, actions, since]
+    [tenant(tenantId), phoneKeys(phone, tenantId), actions, since]
   );
   return result.rowCount > 0;
 }
@@ -244,12 +261,13 @@ async function markRead(jid, tenantId = 'default') {
   await pool.query('UPDATE conversations SET unread=0 WHERE jid=$1 AND tenant_id=$2', [scopedKey(jid, tenantId), tenant(tenantId)]);
 }
 async function isBlocked(phone, tenantId = 'default') {
-  const r = await pool.query('SELECT phone FROM blocklist WHERE phone=$1 AND tenant_id=$2', [scopedKey(phone, tenantId), tenant(tenantId)]);
+  const r = await pool.query('SELECT phone FROM blocklist WHERE phone=ANY($1::text[]) AND tenant_id=$2', [phoneKeys(phone, tenantId), tenant(tenantId)]);
   return r.rows.length > 0;
 }
 async function hasConsent(phone, tenantId = 'default') {
-  const r = await pool.query('SELECT opted_in FROM consent WHERE phone=$1 AND tenant_id=$2', [scopedKey(phone, tenantId), tenant(tenantId)]);
-  return r.rows.length > 0 && Number(r.rows[0].opted_in) === 1;
+  const r = await pool.query('SELECT opted_in FROM consent WHERE phone=ANY($1::text[]) AND tenant_id=$2', [phoneKeys(phone, tenantId), tenant(tenantId)]);
+  // Se existir registro legado em sentido contrario, o opt-out prevalece.
+  return r.rows.length > 0 && r.rows.every(row => Number(row.opted_in) === 1);
 }
 async function getConsents(tenantId = 'default') {
   const r = await pool.query('SELECT phone,opted_in,updated_at FROM consent WHERE tenant_id=$1 ORDER BY phone', [tenant(tenantId)]);
@@ -261,19 +279,19 @@ async function setConsent(phone, optedIn, tenantId = 'default') {
   await pool.query(
     `INSERT INTO consent (phone,tenant_id,opted_in,updated_at) VALUES ($1,$2,$3,$4)
      ON CONFLICT (phone) DO UPDATE SET opted_in=$3,updated_at=$4`,
-    [scopedKey(phone, t), t, optedIn ? 1 : 0, new Date().toISOString()]
+    [scopedKey(canonicalPhone(phone), t), t, optedIn ? 1 : 0, new Date().toISOString()]
   );
 }
 async function ensureConsent(phone, tenantId = 'default') {
   const t = tenant(tenantId);
-  const key = scopedKey(phone, t);
+  const keys = phoneKeys(phone, t);
   const result = await pool.query(
     `INSERT INTO consent (phone,tenant_id,opted_in,updated_at)
      SELECT $1,$2,1,$3
-     WHERE NOT EXISTS (SELECT 1 FROM consent WHERE phone=$1 AND tenant_id=$2)
-       AND NOT EXISTS (SELECT 1 FROM blocklist WHERE phone=$1 AND tenant_id=$2)
+     WHERE NOT EXISTS (SELECT 1 FROM consent WHERE phone=ANY($4::text[]) AND tenant_id=$2)
+       AND NOT EXISTS (SELECT 1 FROM blocklist WHERE phone=ANY($4::text[]) AND tenant_id=$2)
      ON CONFLICT (phone) DO NOTHING`,
-    [key, t, new Date().toISOString()]
+    [keys[0], t, new Date().toISOString(), keys]
   );
   return result.rowCount > 0;
 }
@@ -281,11 +299,11 @@ async function block(phone, reason, tenantId = 'default') {
   const t = tenant(tenantId);
   await pool.query(
     `INSERT INTO blocklist (phone,tenant_id,reason,created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (phone) DO NOTHING`,
-    [scopedKey(phone, t), t, reason || '', new Date().toISOString()]
+    [scopedKey(canonicalPhone(phone), t), t, reason || '', new Date().toISOString()]
   );
 }
 async function unblock(phone, tenantId = 'default') {
-  await pool.query('DELETE FROM blocklist WHERE phone=$1 AND tenant_id=$2', [scopedKey(phone, tenantId), tenant(tenantId)]);
+  await pool.query('DELETE FROM blocklist WHERE phone=ANY($1::text[]) AND tenant_id=$2', [phoneKeys(phone, tenantId), tenant(tenantId)]);
 }
 async function getBlocklist(tenantId = 'default') {
   const r = await pool.query('SELECT * FROM blocklist WHERE tenant_id=$1 ORDER BY created_at DESC', [tenant(tenantId)]);
@@ -491,8 +509,69 @@ async function listJobs(tenantId = 'default', limit = 50) {
   return r.rows;
 }
 
+function mapDelivery(row) {
+  return {
+    id: row.id,
+    instanceId: row.instance_id,
+    jid: row.jid,
+    cameraIds: row.camera_ids ? String(row.camera_ids).split(',').filter(Boolean) : [],
+    status: row.status,
+    motivo: row.motivo,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+async function registerDelivery(entry, tenantId = 'default') {
+  const t = tenant(tenantId);
+  const agora = entry.createdAt || new Date().toISOString();
+  await pool.query(
+    `INSERT INTO message_delivery (id,tenant_id,instance_id,jid,camera_ids,texto,status,motivo,created_at,updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING`,
+    [scopedKey(entry.id, t), t, String(entry.instanceId || 'default'), entry.jid || null,
+      (entry.cameraIds || []).join(','), entry.texto || null, entry.status || 'pendente',
+      entry.motivo || null, agora, agora]
+  );
+}
+
+async function updateDeliveryStatus(id, status, motivo, tenantId = 'default') {
+  const t = tenant(tenantId);
+  const key = scopedKey(id, t);
+  const agora = new Date().toISOString();
+  const resultado = await pool.query(
+    `UPDATE message_delivery SET status=$1, motivo=$2, updated_at=$3 WHERE id=$4 AND tenant_id=$5 RETURNING *`,
+    [status, motivo || null, agora, key, t]
+  );
+  await pool.query('UPDATE messages SET status=$1 WHERE id=$2 AND tenant_id=$3', [status, key, t]);
+  return resultado.rows[0] ? mapDelivery(resultado.rows[0]) : null;
+}
+
+async function getDeliveries(ids = [], tenantId = 'default') {
+  const t = tenant(tenantId);
+  const chaves = Array.isArray(ids) && ids.length ? ids.map(id => scopedKey(id, t)) : [];
+  const r = chaves.length
+    ? await pool.query('SELECT * FROM message_delivery WHERE tenant_id=$1 AND id=ANY($2::text[]) ORDER BY created_at DESC', [t, chaves])
+    : await pool.query('SELECT * FROM message_delivery WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100', [t]);
+  return r.rows.map(mapDelivery);
+}
+async function findDeliveryByExternalId(id) {
+  const externalId = String(id || '');
+  if (!externalId) return null;
+  const result = await pool.query(
+    `SELECT * FROM message_delivery
+      WHERE id=$1 OR right(id, length($1) + 2) = '::' || $1
+      ORDER BY created_at DESC
+      LIMIT 2`,
+    [externalId]
+  );
+  return result.rows.length === 1
+    ? { ...mapDelivery(result.rows[0]), tenantId: result.rows[0].tenant_id }
+    : null;
+}
+
 module.exports = {
   pool, init, scopedKey,
+  registerDelivery, updateDeliveryStatus, getDeliveries, findDeliveryByExternalId,
   getCameras, upsertCamera, updateCamera, deleteCamera,
   addLog, getLog, hasRecentLog,
   getConversations, upsertConversation, incrementUnread, getMessages, addMessage, markRead,

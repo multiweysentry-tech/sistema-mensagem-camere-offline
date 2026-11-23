@@ -2,6 +2,7 @@
 // Este arquivo nao cria sockets e pode ser usado por qualquer instancia.
 const { proto } = require('@whiskeysockets/baileys');
 const { randomBytes } = require('crypto');
+const { normalizarContato } = require('./phone-utils');
 
 const deliveryAckStatus = proto.WebMessageInfo.Status.DELIVERY_ACK;
 const errorStatus = proto.WebMessageInfo.Status.ERROR;
@@ -108,24 +109,27 @@ async function resolveDirectPhoneJid(key, lidMapping) {
   const remoteJid = String(key?.remoteJid || '');
   if (!remoteJid || remoteJid.endsWith('@g.us')) return null;
   const alternateJid = String(key?.remoteJidAlt || '');
-  if (/^\d+@s\.whatsapp\.net$/.test(alternateJid)) return alternateJid;
+  if (isPhoneJid(alternateJid)) return alternateJid;
   if (!remoteJid.endsWith('@lid')) return remoteJid;
   if (typeof lidMapping?.getPNForLID !== 'function') return null;
   const mappedJid = await lidMapping.getPNForLID(remoteJid);
-  return typeof mappedJid === 'string' && /^\d+@s\.whatsapp\.net$/.test(mappedJid)
-    ? mappedJid
-    : null;
+  return isPhoneJid(mappedJid) ? mappedJid : null;
 }
 
 function normalizeDestination(to) {
-  const destination = String(to || '');
-  const raw = (destination.includes('@') ? destination.split('@')[0] : destination).replace(/\D/g, '');
-  const digits = /^\d{10,11}$/.test(raw) && !raw.startsWith('55') ? `55${raw}` : raw;
+  const digits = normalizarContato(to);
   return /^\d{10,15}$/.test(digits) ? digits : null;
 }
 
+function isPhoneJid(jid) {
+  return /^\d+@(s\.whatsapp\.net|c\.us)$/.test(String(jid || ''));
+}
+
 function findExistingNumber(results) {
-  return results.find(entry => entry?.exists) || null;
+  const existing = (Array.isArray(results) ? results : []).filter(entry => entry?.exists);
+  // Prefere o JID de telefone: um LID nao pode ser usado como destinatario
+  // nem como chave de conversa pelo cadastro.
+  return existing.find(entry => isPhoneJid(entry.jid)) || existing[0] || null;
 }
 
 function createInteractiveMessage(text, buttons, footer) {
@@ -189,6 +193,7 @@ module.exports = {
   statusFromReceiptNode,
   resolveDirectPhoneJid,
   normalizeDestination,
+  isPhoneJid,
   findExistingNumber,
   createInteractiveMessage,
   interactiveRelayNodes

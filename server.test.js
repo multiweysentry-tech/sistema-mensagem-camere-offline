@@ -6,6 +6,7 @@ const { extrairDDD } = require('./phone-utils');
 const { generateWAMessageFromContent, proto } = require('@whiskeysockets/baileys');
 const {
   findExistingNumber,
+  normalizeDestination,
   textFromMessage,
   createInteractiveMessage,
   resolveDirectPhoneJid,
@@ -501,6 +502,38 @@ test('billing bot keeps accepted but unconfirmed messages out of delivered statu
   assert.equal(sendCount, 1);
 });
 
+test('billing bot tracks Meta sends as pending without marking cameras delivered', async t => {
+  const { db } = await startServer(t, [camera]);
+  await db.setConsent(camera.responsavel_telefone, true);
+  let sendCount = 0;
+  let metadata;
+  const wa = {
+    async sendWithOptions(...args) {
+      sendCount++;
+      metadata = args[4];
+      return { ok: true, id: 'wamid-meta-1', deliveryStatus: 'pendente' };
+    }
+  };
+  const bots = createBots({
+    db,
+    wa,
+    schedulerApi: { schedule: () => ({ stop() {} }) }
+  });
+  const now = new Date();
+
+  const result = await bots.runBillingBot({ now, force: true, tenantId: 'default', instanceId: 'default' });
+  assert.deepEqual(result, { sent: 0, failed: 0, unconfirmed: 0, pending: 1 });
+  assert.deepEqual(metadata, { tenantId: 'default', instanceId: 'default', cameraIds: [camera.id] });
+  const [updated] = await db.getCameras();
+  assert.equal(updated.status, 'Pendente');
+  assert.equal(updated.tentativas, 0);
+  assert.equal(db.logs[0].acao, 'ENVIO_AGUARDANDO_CONFIRMACAO');
+
+  const retry = await bots.runBillingBot({ now: new Date(now.getTime() + 60 * 60 * 1000), force: true });
+  assert.deepEqual(retry, { sent: 0, failed: 0, unconfirmed: 0 });
+  assert.equal(sendCount, 1);
+});
+
 test('billing bot deduplicates from camera timestamp when its send log is missing', async t => {
   const { db, wa, bots } = await startServer(t, [{
     ...camera,
@@ -638,9 +671,27 @@ test('DDD invalido e rejeitado no cadastro e na consulta do WhatsApp', async t =
   assert.equal(validCheck.body.exists, true);
 });
 
+test('destino do WhatsApp usa a normalização central para todos os formatos', () => {
+  assert.equal(normalizeDestination('065999998888'), '5565999998888');
+  assert.equal(normalizeDestination('65999998888'), '5565999998888');
+  assert.equal(normalizeDestination('+55 (65) 99999-8888'), '5565999998888');
+  assert.equal(normalizeDestination('556599998888'), '556599998888');
+  assert.equal(normalizeDestination('5565999998888@s.whatsapp.net'), '5565999998888');
+  assert.equal(normalizeDestination('5565999998888@c.us'), '5565999998888');
+  assert.equal(normalizeDestination('12345'), null);
+});
+
 test('WhatsApp reconhece número existente quando o JID retornado é LID', () => {
   const result = findExistingNumber([{ jid: '123456789@lid', exists: true }]);
   assert.equal(result.jid, '123456789@lid');
+});
+
+test('findExistingNumber prefere o JID de telefone ao LID', () => {
+  const result = findExistingNumber([
+    { jid: '123456789@lid', exists: true },
+    { jid: '5565999998888@c.us', exists: true }
+  ]);
+  assert.equal(result.jid, '5565999998888@c.us');
 });
 
 test('respostas recebidas por LID são associadas ao JID de telefone, não ao ID LID', async () => {

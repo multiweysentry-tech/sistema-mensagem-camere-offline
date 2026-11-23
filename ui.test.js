@@ -15,3 +15,31 @@ test('scripts inline do painel sao JavaScript valido', () => {
   }
   assert.ok(count > 0, 'nenhum script inline encontrado no index.html');
 });
+
+test('painel carrega a normalização central sem duplicar a regra', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  const shared = fs.readFileSync(path.join(__dirname, 'phone-utils.js'), 'utf8');
+
+  assert.match(html, /<script src="\/phone-utils\.js"><\/script>/);
+  assert.doesNotMatch(html, /DDDS_VALIDOS\s*=\s*new Set/);
+  assert.doesNotMatch(html, /replace\(\/\\D\/g/);
+  assert.doesNotThrow(() => new vm.Script(shared), 'phone-utils.js contem erro de sintaxe');
+
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(shared, context);
+  assert.equal(context.PhoneUtils.extrairDDD('065999998888'), '65');
+  assert.equal(
+    context.PhoneUtils.chaveComparacaoTelefone('5565999998888@s.whatsapp.net'),
+    '6599998888'
+  );
+});
+
+test('painel não oferece ações locais de QR para servidor WhatsApp remoto', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+
+  assert.match(html, /const connectionControls=waState\.provider==="meta"\s*\?[\s\S]*?:\s*waState\.remote/);
+  assert.match(html, /Status no servidor Baileys: <b>\$\{esc\(waState\.remoteStatus\|\|waState\.status\)\}/);
+  assert.match(html, /waState\.remote\?"":status==="open"/);
+  assert.match(html, /endpoint protegido <code>\/qr<\/code>/);
+});

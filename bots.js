@@ -1,12 +1,17 @@
 const cron = require('node-cron');
 const defaultWa = require('./whatsapp');
 const defaultDb = require('./db');
+const { normalizarContato, normalizarTelefone, chaveComparacaoTelefone } = require('./phone-utils');
 
 const TIME_ZONE = 'America/Cuiaba';
 let scheduler = null;
 
 function normalizePhone(value) {
-  return String(value || '').replace(/\D/g, '');
+  return normalizarContato(value);
+}
+
+function contactKey(value) {
+  return chaveComparacaoTelefone(value) || normalizePhone(value);
 }
 
 function localHour(date = new Date()) {
@@ -114,7 +119,7 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
     if (db.hasRecentLog) return db.hasRecentLog(phone, actions, threshold.toISOString(), tenantId);
     const entries = await db.getLog(tenantId);
     return entries.some(entry => actions.includes(entry.acao) &&
-      normalizePhone(entry.responsavel_telefone) === phone &&
+      contactKey(entry.responsavel_telefone) === contactKey(phone) &&
       Date.parse(entry.timestamp) >= threshold.getTime());
   }
 
@@ -131,13 +136,21 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
     for (const camera of cameras) {
       const phone = normalizePhone(camera.responsavel_telefone);
       if (!/^\d{10,15}$/.test(phone)) continue;
-      const group = groups.get(phone) || {
+      // 10 e 11 digitos (com/sem o 9º) viram o mesmo contato.
+      const key = contactKey(camera.responsavel_telefone) || phone;
+      const group = groups.get(key) || {
+        key,
         phone,
         name: camera.responsavel_nome || '',
         cameras: []
       };
+      // Se um dos cadastros tem o 9º digito, preferimos esse numero para o envio.
+      if (normalizarTelefone(camera.responsavel_telefone).nacional.length >
+          normalizarTelefone(group.phone).nacional.length) {
+        group.phone = phone;
+      }
       group.cameras.push(camera);
-      groups.set(phone, group);
+      groups.set(key, group);
     }
     return [...groups.values()];
   }
@@ -157,6 +170,7 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
     let sent = 0;
     let failed = 0;
     let unconfirmed = 0;
+    let pending = 0;
 
     for (const group of groupByPhone(eligible)) {
       const lockKey = campaignKey(group.phone, { tenantId, instanceId });
@@ -165,15 +179,37 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
       try {
         if (!(await canSendCampaign(group.phone, tenantId))) continue;
         if (hasRecentCameraNotice(group.cameras, now)) continue;
-        if (await hasRecentSend(group.phone, ['COBRANCA_ENVIADA', 'LEMBRETE_MANUTENCAO', 'ENVIO_SEM_CONFIRMACAO', 'ERRO'], new Date(now.getTime() - 24 * 60 * 60 * 1000), tenantId)) continue;
+        if (await hasRecentSend(group.phone, ['COBRANCA_ENVIADA', 'LEMBRETE_MANUTENCAO', 'ENVIO_SEM_CONFIRMACAO', 'ENVIO_AGUARDANDO_CONFIRMACAO', 'ERRO'], new Date(now.getTime() - 24 * 60 * 60 * 1000), tenantId)) continue;
 
         const attempts = Math.max(...group.cameras.map(camera => Number(camera.tentativas) || 0)) + 1;
         const cameraList = group.cameras.map(camera => `• ${camera.camera_nome || camera.id}`).join('\n');
         const message = `Olá, ${group.name}!\nO Sentry identificou que estas câmeras estão offline:\n${cameraList}\n\nComo prefere prosseguir? Toque em uma opção abaixo para atualizar o status.`;
 
         try {
-          const result = await instance.sendWithOptions(group.phone, message);
+          const result = await instance.sendWithOptions(group.phone, message, undefined, undefined, {
+            tenantId,
+            instanceId,
+            cameraIds: group.cameras.map(camera => camera.id)
+          });
           const timestamp = now.toISOString();
+          if (result?.deliveryStatus === 'pendente') {
+            await db.addLog({
+              timestamp,
+              camera_id: group.cameras.map(camera => camera.id).join(','),
+              camera_nome: group.cameras.map(camera => camera.camera_nome).join(', '),
+              responsavel_telefone: group.phone,
+              acao: 'ENVIO_AGUARDANDO_CONFIRMACAO',
+              detalhe: `Mensagem ${result.id || 'sem ID'} aceita pela Cloud API; aguardando confirmação de entrega`,
+              status_anterior: group.cameras.map(camera => camera.status).join(','),
+              status_novo: group.cameras.map(camera => camera.status).join(','),
+              instance_id: instanceId
+            }, tenantId);
+            for (const camera of group.cameras) {
+              await db.updateCamera(camera.id, { ultima_cobranca: timestamp }, tenantId);
+            }
+            pending++;
+            continue;
+          }
           if (result?.deliveryStatus === 'unconfirmed') {
             await db.addLog({
               timestamp,
@@ -233,7 +269,7 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
         campaignsInProgress.delete(lockKey);
       }
     }
-    return { sent, failed, unconfirmed };
+    return { sent, failed, unconfirmed, ...(pending ? { pending } : {}) };
   }
 
   async function runMaintenanceBot({ now = new Date(), force = false, tenantId = 'default', instanceId = 'default' } = {}) {
@@ -247,16 +283,38 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
     let sent = 0;
     let failed = 0;
     let unconfirmed = 0;
+    let pending = 0;
     for (const group of groups) {
       const lockKey = campaignKey(group.phone, { tenantId, instanceId });
       if (campaignsInProgress.has(lockKey)) continue;
       campaignsInProgress.add(lockKey);
       try {
         if (!(await canSendCampaign(group.phone, tenantId))) continue;
-        if (await hasRecentSend(group.phone, ['COBRANCA_ENVIADA', 'LEMBRETE_MANUTENCAO', 'ENVIO_SEM_CONFIRMACAO', 'ERRO'], new Date(now.getTime() - 24 * 60 * 60 * 1000), tenantId)) continue;
+        if (await hasRecentSend(group.phone, ['COBRANCA_ENVIADA', 'LEMBRETE_MANUTENCAO', 'ENVIO_SEM_CONFIRMACAO', 'ENVIO_AGUARDANDO_CONFIRMACAO', 'ERRO'], new Date(now.getTime() - 24 * 60 * 60 * 1000), tenantId)) continue;
         const cameraList = group.cameras.map(camera => `• ${camera.camera_nome || camera.id}${camera.local ? ` (${camera.local})` : ''}`).join('\n');
         try {
-          const result = await instance.sendWithOptions(group.phone, `Lembrete do Sentry: estas câmeras estão offline:\n${cameraList}\nComo prefere prosseguir? Toque em uma opção abaixo para atualizar o status.`);
+          const result = await instance.sendWithOptions(
+            group.phone,
+            `Lembrete do Sentry: estas câmeras estão offline:\n${cameraList}\nComo prefere prosseguir? Toque em uma opção abaixo para atualizar o status.`,
+            undefined,
+            undefined,
+            { tenantId, instanceId, cameraIds: group.cameras.map(camera => camera.id) }
+          );
+          if (result?.deliveryStatus === 'pendente') {
+            await db.addLog({
+              timestamp: now.toISOString(),
+              camera_id: group.cameras.map(camera => camera.id).join(','),
+              camera_nome: group.cameras.map(camera => camera.camera_nome).join(', '),
+              responsavel_telefone: group.phone,
+              acao: 'ENVIO_AGUARDANDO_CONFIRMACAO',
+              detalhe: `Lembrete ${result.id || 'sem ID'} aceito pela Cloud API; aguardando confirmação de entrega`,
+              status_anterior: 'Pendente',
+              status_novo: 'Pendente',
+              instance_id: instanceId
+            }, tenantId);
+            pending++;
+            continue;
+          }
           if (result?.deliveryStatus === 'unconfirmed') {
             await db.addLog({
               timestamp: now.toISOString(),
@@ -303,27 +361,37 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
         campaignsInProgress.delete(lockKey);
       }
     }
-    return { sent, failed, unconfirmed };
+    return { sent, failed, unconfirmed, ...(pending ? { pending } : {}) };
   }
 
   async function onIncomingMessage(jid, text, options = {}) {
     const tenantId = options.tenantId || 'default';
     const instanceId = options.instanceId || 'default';
     const instance = waFor({ tenantId, instanceId });
-    const phone = normalizePhone(String(jid || '').split('@')[0]);
-    if (!/^\d{10,15}$/.test(phone)) return;
+    const phone = normalizePhone(jid);
+    const key = contactKey(jid);
+    if (!phone || !key) return;
     const action = parseReply(text);
+    const cameras = (await db.getCameras(tenantId))
+      .filter(camera => contactKey(camera.responsavel_telefone) === key);
+    const phones = [...new Set([
+      phone,
+      ...cameras.map(camera => normalizePhone(camera.responsavel_telefone)).filter(Boolean)
+    ])];
 
     if (action?.intent === 'opt_out') {
-      await db.setConsent(phone, false, tenantId);
-      await db.block(phone, 'Opt-out solicitado por WhatsApp', tenantId);
+      for (const target of phones) {
+        await db.setConsent(target, false, tenantId);
+        await db.block(target, 'Opt-out solicitado por WhatsApp', tenantId);
+      }
       await instance.sendMessage(phone, 'Tudo certo. Voce nao recebera mais mensagens automaticas. Para voltar a receber, entre em contato com a equipe.');
       return;
     }
 
-    if (await db.isBlocked(phone, tenantId)) return;
+    for (const target of phones) {
+      if (await db.isBlocked(target, tenantId)) return;
+    }
     const config = await getConfig(tenantId);
-    const cameras = (await db.getCameras(tenantId)).filter(camera => normalizePhone(camera.responsavel_telefone) === phone);
     if (!cameras.length) return;
     if (!action) return;
 

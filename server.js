@@ -1,7 +1,10 @@
 // Load .env
 const fs = require('fs');
 const path = require('path');
-const { telefoneBrasileiroValido } = require('./phone-utils');
+const { normalizarContato, telefoneBrasileiroValido, chaveComparacaoTelefone } = require('./phone-utils');
+const whatsappRemoto = require('./lib/whatsapp');
+const { registerWebhook } = require('./lib/webhook');
+const { registerMetaWebhook } = require('./lib/meta-webhook');
 const envPath = path.join(__dirname, '.env');
 if (!process.env.VERCEL && fs.existsSync(envPath)) {
   for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
@@ -38,7 +41,7 @@ const CAMERA_FIELDS = new Set([
 ]);
 
 function normalizePhone(value) {
-  return String(value || '').replace(/\D/g, '');
+  return normalizarContato(value);
 }
 
 function validPhone(value) {
@@ -48,6 +51,12 @@ function validPhone(value) {
 // Cadastro so aceita numeros brasileiros com DDD valido.
 function validCadastroPhone(value) {
   return telefoneBrasileiroValido(value);
+}
+
+// Chave usada para cruzar o JID do WhatsApp com o cadastro, tolerando a
+// ausencia do 9º digito.
+function conversationKey(value) {
+  return chaveComparacaoTelefone(value) || normalizePhone(value);
 }
 
 function validateCamera(camera, partial = false) {
@@ -71,7 +80,9 @@ function validateCamera(camera, partial = false) {
 
 function createApp(options = {}) {
   const db = options.db || require('./db');
-  const wa = options.wa || require('./whatsapp');
+  const wa = options.wa || (whatsappRemoto.isRemoteConfigured()
+    ? whatsappRemoto.createRemoteWhatsapp()
+    : require('./whatsapp'));
   const bots = options.bots || require('./bots');
   const auth = options.auth || null;
   const sessionManager = options.sessionManager || null;
@@ -92,7 +103,7 @@ function createApp(options = {}) {
       if (sessionManager) {
         socket.emit('wa:status', sessionManager.list(identity.tenantId));
       } else {
-        socket.emit('wa:status', wa.getStatus());
+        socket.emit('wa:status', await wa.getStatus());
       }
     } catch (error) {
       socket.emit('wa:error', { erro: 'Nao autorizado' });
@@ -103,13 +114,74 @@ function createApp(options = {}) {
   // Resolve a instancia WhatsApp da requisicao, isolada por tenant.
   function instanceFor(req) {
     const instanceId = String(req.body?.instanceId || req.query?.instanceId || 'default');
+    if (wa.remote) return wa;
     if (sessionManager) return sessionManager.getOrCreate(req.tenantId || 'default', instanceId);
     return wa;
+  }
+
+  // Webhook precisa do corpo bruto para validar o HMAC e não pode passar pelo login.
+  const { log: logEvent } = require('./logger');
+  const logWebhook = {
+    info: fields => logEvent('info', 'webhook', fields),
+    warn: fields => logEvent('warn', 'webhook', fields),
+    error: fields => logEvent('error', 'webhook', fields)
+  };
+  registerWebhook(app, {
+    db,
+    secret: String(process.env.WEBHOOK_SECRET || '').trim(),
+    logger: logWebhook,
+    timeoutMinutes: Number(process.env.WA_CONFIRM_TIMEOUT_MINUTES || 15)
+  });
+  if (wa.provider === 'meta') {
+    registerMetaWebhook(app, {
+      db,
+      bots,
+      ...wa.webhookConfig,
+      logger: logWebhook
+    });
+  }
+
+  async function registrarEnvioRemoto(req, resultado, texto) {
+    if (!resultado?.remote || !db.registerDelivery) return;
+    const tenantId = req.tenantId || 'default';
+    const instanceId = String(req.body?.instanceId || 'default');
+    const agora = new Date().toISOString();
+    const jid = resultado.jid;
+    const cameraIds = Array.isArray(req.body?.cameraIds)
+      ? req.body.cameraIds.slice(0, 50).map(String)
+      : [];
+    if (db.upsertConversation) {
+      await db.upsertConversation(jid, resultado.numero || normalizePhone(req.body?.to), String(texto).slice(0, 200), agora, tenantId, instanceId);
+    }
+    if (db.addMessage) {
+      await db.addMessage(jid, {
+        id: resultado.id,
+        from: jid,
+        text: texto,
+        time: agora,
+        direction: 'out',
+        status: 'pendente'
+      }, tenantId, instanceId);
+    }
+    await db.registerDelivery({
+      id: resultado.id,
+      tenantId,
+      instanceId,
+      jid,
+      cameraIds,
+      texto: String(texto).slice(0, 4096),
+      status: 'pendente',
+      createdAt: agora
+    }, tenantId);
   }
 
   app.use(express.json({ limit: '1mb' }));
   app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
   app.get('/logo-sentry.png', (req, res) => res.sendFile(path.join(__dirname, 'logo-sentry.png')));
+  app.get('/phone-utils.js', (req, res) => {
+    res.set('Cache-Control', 'public, max-age=0');
+    return res.sendFile(path.join(__dirname, 'phone-utils.js'));
+  });
   app.use((err, req, res, next) => {
     if (err && err.type === 'entity.parse.failed') {
       return res.status(400).json({ codigo: 'INVALID_JSON', erro: 'JSON invalido' });
@@ -273,10 +345,35 @@ function createApp(options = {}) {
     }
   });
 
-  app.get('/api/whatsapp/status', (req, res) => {
-    const status = instanceFor(req).getStatus();
-    if (!sessionManager) return res.json(status);
-    return res.json({ ...status, instances: sessionManager.list(req.tenantId) });
+  app.get('/api/whatsapp/status', async (req, res) => {
+    try {
+      const status = await instanceFor(req).getStatus();
+      if (!sessionManager || wa.remote) return res.json(status);
+      return res.json({ ...status, instances: sessionManager.list(req.tenantId) });
+    } catch (error) {
+      return res.status(503).json({ codigo: 'WHATSAPP_STATUS_FAILED', erro: error.message });
+    }
+  });
+
+  // Status real de cada alerta. O timeout é calculado na leitura para funcionar
+  // também no Vercel, onde não existe processo em background.
+  app.get('/api/whatsapp/delivery', async (req, res) => {
+    const timeoutMinutos = Number(process.env.WA_CONFIRM_TIMEOUT_MINUTES || 15);
+    try {
+      if (!db.getDeliveries) return res.json({ entregas: [], timeoutMinutos });
+      const entregas = (await db.getDeliveries([], req.tenantId)).map(entrega => {
+        const idadeMinutos = (Date.now() - Date.parse(entrega.createdAt || '')) / 60000;
+        const aguardando = ['pendente', 'enviada'].includes(entrega.status);
+        return {
+          ...entrega,
+          expirado: aguardando && idadeMinutos > timeoutMinutos,
+          statusExibido: aguardando && idadeMinutos > timeoutMinutos ? 'sem_confirmacao' : entrega.status
+        };
+      });
+      return res.json({ entregas, timeoutMinutos });
+    } catch (error) {
+      return res.status(500).json({ erro: error.message });
+    }
   });
   app.post('/api/whatsapp/connect', async (req, res) => {
     try {
@@ -307,20 +404,26 @@ function createApp(options = {}) {
   });
   app.post('/api/whatsapp/send', async (req, res) => {
     const { to, text } = req.body || {};
-    if ((!validPhone(to) && !/^\d{10,15}@s\.whatsapp\.net$/.test(String(to || ''))) ||
+    if (!validPhone(to) ||
         typeof text !== 'string' || !text.trim() || text.length > 4096) {
       return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe um telefone e uma mensagem valida (ate 4096 caracteres)' });
     }
+    const metadata = {
+      tenantId: req.tenantId || 'default',
+      instanceId: String(req.body?.instanceId || 'default'),
+      cameraIds: Array.isArray(req.body?.cameraIds) ? req.body.cameraIds.slice(0, 50).map(String) : []
+    };
     try {
-      const result = await instanceFor(req).sendMessage(String(to), text.trim());
-      return res.json(result);
+      const result = await instanceFor(req).sendMessage(String(to), text.trim(), metadata);
+      await registrarEnvioRemoto(req, result, text.trim());
+      return res.status(result.deliveryStatus === 'pendente' ? 202 : 200).json(result);
     } catch (error) {
       return res.status(503).json({ codigo: 'WHATSAPP_SEND_FAILED', erro: error.message });
     }
   });
   app.post('/api/whatsapp/send-options', async (req, res) => {
     const { to, text, buttons, footer } = req.body || {};
-    if ((!validPhone(to) && !/^\d{10,15}@s\.whatsapp\.net$/.test(String(to || ''))) ||
+    if (!validPhone(to) ||
         typeof text !== 'string' || !text.trim() || text.length > 4096) {
       return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe um telefone e uma mensagem valida (ate 4096 caracteres)' });
     }
@@ -346,9 +449,15 @@ function createApp(options = {}) {
       });
     }
     whatsappSendsInProgress.add(sendKey);
+    const metadata = {
+      tenantId: req.tenantId || 'default',
+      instanceId: String(req.body?.instanceId || 'default'),
+      cameraIds: Array.isArray(req.body?.cameraIds) ? req.body.cameraIds.slice(0, 50).map(String) : []
+    };
     try {
-      const result = await instanceFor(req).sendWithOptions(String(to), text.trim(), buttons, footer);
-      return res.status(result.deliveryStatus === 'unconfirmed' ? 202 : 200).json(result);
+      const result = await instanceFor(req).sendWithOptions(String(to), text.trim(), buttons, footer, metadata);
+      await registrarEnvioRemoto(req, result, text.trim());
+      return res.status(['unconfirmed', 'pendente'].includes(result.deliveryStatus) ? 202 : 200).json(result);
     } catch (error) {
       return res.status(503).json({ codigo: 'WHATSAPP_SEND_FAILED', erro: error.message });
     } finally {
@@ -356,7 +465,7 @@ function createApp(options = {}) {
     }
   });
   app.get('/api/whatsapp/check/:phone', async (req, res) => {
-    const phone = String(req.params.phone || '').replace(/\D/g, '');
+    const phone = normalizePhone(req.params.phone);
     if (!validCadastroPhone(phone)) {
       return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Telefone invalido' });
     }
@@ -378,9 +487,9 @@ function createApp(options = {}) {
   });
   app.get('/api/whatsapp/history/:phone', async (req, res) => {
     try {
-      const phone = req.params.phone.replace(/\D/g,'');
+      const phone = conversationKey(req.params.phone);
       const convs = await db.getConversations(req.tenantId);
-      const conv = convs.find(c => c.jid.includes(phone));
+      const conv = convs.find(c => conversationKey(c.jid) === phone);
       if (!conv) return res.json({ messages: [], conversation: null });
       const msgs = await db.getMessages(conv.jid, req.tenantId);
       return res.json({ conversation: conv, messages: msgs });
@@ -777,31 +886,61 @@ if (require.main === module) {
   }
 
   const db = require('./db');
-  const wa = require('./whatsapp');
+  const { createMetaWhatsapp, isConfigured: isMetaConfigured } = require('./lib/meta-whatsapp');
+  const provider = String(process.env.WHATSAPP_PROVIDER || 'baileys').trim().toLowerCase();
+  if (!['baileys', 'meta'].includes(provider)) {
+    throw new Error('WHATSAPP_PROVIDER deve ser "baileys" ou "meta"');
+  }
+  const metaConfigurado = provider === 'meta';
+  if (metaConfigurado && !isMetaConfigured()) {
+    throw new Error('WHATSAPP_PROVIDER=meta exige META_WA_ACCESS_TOKEN e META_WA_PHONE_NUMBER_ID');
+  }
+  const remotoConfigurado = !metaConfigurado && whatsappRemoto.isRemoteConfigured();
+  const wa = metaConfigurado
+    ? createMetaWhatsapp({ db })
+    : remotoConfigurado
+      ? whatsappRemoto.createRemoteWhatsapp()
+      : require('./whatsapp');
+  if (metaConfigurado && (!wa.webhookConfig.secret || !wa.webhookConfig.verifyToken)) {
+    throw new Error('WHATSAPP_PROVIDER=meta exige META_WA_APP_SECRET e META_WA_VERIFY_TOKEN para validar o webhook');
+  }
   const auth = process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD ? createAuth({ db }) : null;
 
   let bots = botsModule;
-  const sessionManager = createSessionManager({
+  const sessionManager = remotoConfigurado || metaConfigurado ? null : createSessionManager({
     db,
     resolveBots: () => bots
   });
+  const instanciaPadrao = () => (sessionManager
+    ? sessionManager.getOrCreate('default', 'default')
+    : wa);
   bots = botsModule.createBots({
     db,
-    wa: sessionManager.getOrCreate('default', 'default'),
-    resolveWa: ({ tenantId, instanceId }) => sessionManager.getOrCreate(tenantId, instanceId),
+    wa: instanciaPadrao(),
+    resolveWa: sessionManager
+      ? ({ tenantId, instanceId }) => sessionManager.getOrCreate(tenantId, instanceId)
+      : () => wa,
     listInstances: () => db.listInstances()
   });
+  if (remotoConfigurado) {
+    log('info', 'wa.remote_mode', { url: wa.serverUrl });
+  } else if (metaConfigurado) {
+    log('info', 'wa.meta_mode', { graphVersion: process.env.META_WA_GRAPH_VERSION || 'v27.0' });
+  }
 
   const app = createApp({ db, wa, bots, auth, sessionManager });
   const queue = createQueue({ db, workerId: `sentry-${process.pid}`, pollMs: 1500 });
 
+  function instanciaDoPayload(payload) {
+    return sessionManager
+      ? sessionManager.getOrCreate(payload.tenantId || 'default', payload.instanceId || 'default')
+      : wa;
+  }
   queue.register('send_text', async payload => {
-    const instance = sessionManager.getOrCreate(payload.tenantId || 'default', payload.instanceId || 'default');
-    await instance.sendMessage(payload.to, payload.text);
+    await instanciaDoPayload(payload).sendMessage(payload.to, payload.text);
   });
   queue.register('send_options', async payload => {
-    const instance = sessionManager.getOrCreate(payload.tenantId || 'default', payload.instanceId || 'default');
-    await instance.sendWithOptions(payload.to, payload.text, payload.buttons, payload.footer);
+    await instanciaDoPayload(payload).sendWithOptions(payload.to, payload.text, payload.buttons, payload.footer);
   });
   queue.register('run_billing', async payload => bots.runBillingBot({
     force: true, tenantId: payload.tenantId || 'default', instanceId: payload.instanceId || 'default'
@@ -818,7 +957,7 @@ if (require.main === module) {
 
   async function shutdown() {
     queue.stop();
-    await Promise.allSettled(sessionManager.all().map(session => session.disconnect({ logout: false })));
+    if (sessionManager) await Promise.allSettled(sessionManager.all().map(session => session.disconnect({ logout: false })));
     app.server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 5000).unref();
   }
@@ -839,7 +978,7 @@ if (require.main === module) {
       console.log(`Servidor rodando em http://${host}:${port}`);
       log('info', 'server.listening', { host, port, auth: Boolean(auth) });
       bots.startSchedulers().catch(error => log('error', 'bots.scheduler_failed', { error }));
-      sessionManager.restore().catch(error => log('error', 'wa.restore_failed', { error }));
+      if (sessionManager) sessionManager.restore().catch(error => log('error', 'wa.restore_failed', { error }));
       queue.start();
     });
   }

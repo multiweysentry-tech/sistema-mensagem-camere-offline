@@ -1,12 +1,13 @@
 // Logging estruturado sem dependencias externas.
 // Nunca imprime credenciais, QR ou numero completo de telefone.
 const { randomUUID } = require('crypto');
+const { normalizarTelefone } = require('./phone-utils');
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const threshold = LEVELS[String(process.env.LOG_LEVEL || 'info').toLowerCase()] || LEVELS.info;
 
 function redactPhone(value) {
-  const digits = String(value || '').replace(/\D/g, '');
+  const digits = normalizarTelefone(value).digits;
   if (digits.length < 6) return '[redacted]';
   return `${digits.slice(0, 2)}***${digits.slice(-2)}`;
 }

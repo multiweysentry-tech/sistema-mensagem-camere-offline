@@ -48,6 +48,36 @@ Detalhes importantes:
 - Cada instância executa seus bots com locks próprios, evitando que a mesma campanha seja enviada duas vezes.
 - A conexão por QR usa Baileys/WhatsApp Web, não a API oficial Meta. É uma integração não oficial e pode desconectar ou deixar de funcionar após mudanças no WhatsApp. Não há garantia de estabilidade. Para operação comercial crítica, prefira a API oficial da Meta. Não implementamos evasão de limites ou mecanismos antispam do WhatsApp.
 
+## WhatsApp Cloud API oficial
+
+O adaptador oficial funciona no servidor local ou no deploy Vercel. Para testar sem mexer no número que já está ativo no aplicativo móvel, comece pelo número de teste oferecido no painel Meta:
+
+1. No Meta for Developers, crie/configure um app com o produto WhatsApp e use o **Phone Number ID** e um token de acesso com `whatsapp_business_messaging` e `whatsapp_business_management`. No modo de teste, adicione e confirme o telefone destinatário permitido pela Meta.
+2. Crie e envie para aprovação um template de categoria **Utility**, idioma `pt_BR`, chamado `sentry_camera_offline` (ou outro nome definido em `META_WA_TEMPLATE_NAME`). O corpo deve conter exatamente um parâmetro `{{1}}`, por exemplo: `O Sentry identificou estas câmeras offline: {{1}}. Escolha uma opção abaixo para atualizar o status.` Inclua três botões de resposta rápida: **Estou verificando**, **Preciso de suporte** e **Já resolvi**.
+3. Configure as variáveis no `.env` local ou nas variáveis de ambiente do projeto Vercel, sem compartilhar nem versionar os valores:
+
+   ```dotenv
+   WHATSAPP_PROVIDER=meta
+   META_WA_ACCESS_TOKEN=...
+   META_WA_PHONE_NUMBER_ID=...
+   META_WA_GRAPH_VERSION=v27.0
+   META_WA_TEMPLATE_NAME=sentry_camera_offline
+   META_WA_TEMPLATE_LANGUAGE=pt_BR
+   META_WA_APP_SECRET=...
+   META_WA_VERIFY_TOKEN=...
+   META_WA_TENANT_ID=default
+   ```
+
+4. Configure o callback HTTPS e mantenha o destino ativo:
+   - **Servidor local:** use um túnel HTTPS que encaminhe para a porta local 3000 e cadastre `https://SEU_TUNEL/api/whatsapp/meta/webhook`.
+   - **Vercel:** cadastre `https://SEU_DOMINIO_VERCEL/api/whatsapp/meta/webhook` como callback. Para este projeto, o endereço informado é `https://sistema-mensagem-camere-offline.vercel.app/api/whatsapp/meta/webhook`.
+   Nos dois casos, use o mesmo `META_WA_VERIFY_TOKEN`, assine o campo `messages` e configure `META_WA_APP_SECRET` para validar a assinatura HMAC. Reinicie o servidor local ou redeploy a Vercel depois de alterar as variáveis.
+5. Teste primeiro com o número de teste e um contato autorizado no painel Meta. Não desconecte nem migre o número ativo no aplicativo móvel. A conexão oficial não usa QR. Os bots locais usam o template aprovado; mensagens de texto livres só podem ser enviadas dentro da janela de atendimento permitida pela Meta.
+
+O envio fica como pendente até chegar um status de entrega pelo webhook. Sem URL HTTPS pública, token/verificação configurados e assinatura `messages`, envios podem ser aceitos pela API, mas entregas e respostas não serão sincronizadas com o painel.
+`META_WA_TENANT_ID` define o tenant associado às respostas recebidas (use `default` em uma instalação simples). O servidor exige o App Secret e o token de verificação para iniciar esse provider.
+Na Vercel, configure também um PostgreSQL remoto: o banco em memória não persiste entre invocações e não é adequado para correlacionar os envios com os webhooks.
+
 ## Central WhatsApp e diagnóstico
 
 - A aba **Central WhatsApp** mostra conversas e mensagens da instância selecionada, com envio manual e atualização em tempo real via Socket.IO no servidor local.
@@ -68,6 +98,7 @@ Sem Postgres, o adaptador serverless usa uma fila em memória apenas para não q
 ## Cadastro e avisos
 
 - Ao cadastrar um responsável, o painel valida o DDD brasileiro (com ou sem DDI `55`) e consulta o WhatsApp, bloqueando números inexistentes. Se a consulta estiver indisponível, o cadastro prossegue com aviso.
+- Toda normalização de telefone usa a única regra em `phone-utils.js` (compartilhada pelo painel): aceita JID `@s.whatsapp.net`/`@c.us`, máscara, zero à esquerda e número sem DDI. A chave de comparação `DDD + últimos 8 dígitos` cruza o contato do WhatsApp com o cadastro mesmo quando o 9º dígito não foi informado; o 9º dígito não é inventado no cadastro. No envio pelo servidor Baileys persistente, números legados de 10 dígitos recebem o 9º dígito apenas para a consulta no WhatsApp — se o número não existir, o envio é recusado com 400.
 - O envio de avisos usa opções clicáveis para o cliente no WhatsApp: **Estou verificando**, **Preciso de suporte** e **Já resolvi**. Se o WhatsApp não aceitar as opções interativas, o envio falha explicitamente em vez de registrar como enviado um texto sem botões.
 - As respostas dos botões (ou os números digitados) atualizam o status automaticamente.
 - A confirmação de entrega vem do receipt do aparelho destinatário (`DELIVERY_ACK`, status `3`), capturado em `messages.update` e no callback bruto `CB:receipt`. O envio interativo usa apenas o nó `<biz>` para renderizar os botões; **não** incluir `<bot biz_bot="1">`, porque mensagens marcadas como bot não geram receipt de entrega e ficariam presas em `unconfirmed`.
@@ -85,7 +116,7 @@ Sem Postgres, o adaptador serverless usa uma fila em memória apenas para não q
 
 ## Integração n8n
 
-Os JSONs em `workflows/` são fluxos antigos para a API oficial Meta e permanecem inativos. Eles usam credenciais/configuração Cloud API que não fazem parte da conexão por QR. **Não ative esses fluxos junto com os bots locais**, para evitar caminhos de envio concorrentes.
+Os JSONs em `workflows/` são fluxos antigos para a API oficial Meta e permanecem inativos. Eles usam credenciais/configuração Cloud API que não fazem parte da conexão por QR. **Não ative esses fluxos junto com os bots locais**, para evitar caminhos de envio concorrentes. Por serem fluxos n8n independentes, eles mantêm seu próprio tratamento de telefone e **não** usam a normalização central deste repositório; se forem reativados, precisam ser adaptados.
 
 ## API principal
 
@@ -109,6 +140,21 @@ Os JSONs em `workflows/` são fluxos antigos para a API oficial Meta e permanece
 | `POST` | `/api/consent` | Registra ou remove autorização de mensagens |
 | `POST` | `/api/bots/billing/run`, `/api/bots/maintenance/run` | Execução manual dos bots |
 
+## WhatsApp persistente (`wa-server/`)
+
+Para receber confirmação real de entrega, suba o servidor separado em `wa-server/` (VPS/Railway/Render/Fly/Docker). Ele usa Baileys 7.0.0-rc14 fixado, sessão em `SESSION_DIR`, fila com intervalo 3–8 s e webhook HMAC para o painel. O guia completo está em [`wa-server/README.md`](wa-server/README.md).
+
+Resumo:
+
+```bash
+cp wa-server/.env.example wa-server/.env   # preencha API_KEY e WEBHOOK_SECRET
+docker build -f wa-server/Dockerfile -t multiwey-wa-server .
+docker run -d --restart unless-stopped --env-file wa-server/.env \
+  -p 3001:3001 -v wa-session:/app/session multiwey-wa-server
+```
+
+No painel (Vercel ou servidor local), defina `WA_SERVER_URL`, `WA_API_KEY` e o **mesmo** `WEBHOOK_SECRET`. O QR é exibido no terminal e em `GET /qr` do servidor (protegido por `x-api-key`).
+
 ## Deploy na Vercel
 
 O projeto possui um adaptador serverless em `api/index.js` e o `vercel.json` com rewrite de todas as rotas para ele. Configure o projeto da Vercel com **Framework Preset: Other**, **Build Command** e **Output Directory** vazios.
@@ -117,12 +163,13 @@ Defina estas variáveis de ambiente no projeto da Vercel (o `.env` local não é
 
 - `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE` — o PostgreSQL precisa estar acessível pela rede; `127.0.0.1` não funciona na Vercel.
 - Não defina `API_KEY` neste deploy: o painel não envia o cabeçalho `x-api-key` e todas as chamadas retornariam 401. Proteja o acesso com a **Password Protection** da Vercel ou restrição de IP.
-- Para WhatsApp pela API oficial Meta: `META_WA_ACCESS_TOKEN` e `META_WA_PHONE_NUMBER_ID`.
-- Para usar uma conexão Baileys local por meio seguro: `WHATSAPP_BRIDGE_URL` e opcionalmente `WHATSAPP_BRIDGE_KEY`.
+- Para escolher a API oficial no deploy: `WHATSAPP_PROVIDER=meta`, `META_WA_ACCESS_TOKEN`, `META_WA_PHONE_NUMBER_ID`, `META_WA_GRAPH_VERSION` (`v27.0`), `META_WA_TEMPLATE_NAME`, `META_WA_TEMPLATE_LANGUAGE`, `META_WA_APP_SECRET`, `META_WA_VERIFY_TOKEN` e, se necessário, `META_WA_TENANT_ID`. O callback é `https://SEU_DOMINIO/api/whatsapp/meta/webhook`; assine `messages` no webhook do app Meta. Se definir `META_WA_TIMEOUT_MS`, use no máximo 7000 ms na Vercel.
+- **Recomendado:** `WA_SERVER_URL`, `WA_API_KEY` e `WEBHOOK_SECRET` para usar o servidor Baileys persistente em `wa-server/`. O módulo `lib/whatsapp.js` mantém as credenciais apenas no servidor e o painel passa a mostrar status real de entrega. Opcionalmente `WA_CONFIRM_TIMEOUT_MINUTES` (padrão 15).
+- Ponte legada: `WHATSAPP_BRIDGE_URL` e opcionalmente `WHATSAPP_BRIDGE_KEY` (usada somente se `WA_SERVER_URL`/`WA_API_KEY` não estiverem definidos).
 
-O painel publicado na Vercel **não mantém sessão WhatsApp por QR**. O botão **Conectar** retorna `503` por design e isso é comportamento esperado, não uma falha a ser corrigida no frontend. O estado `configured` confirma apenas que há credenciais de envio; não confirma conexão nem entrega. Para usar seu próprio WhatsApp e os bots Baileys, abra `http://127.0.0.1:3000` no computador onde o servidor persistente está em execução, ou hospede o backend em uma VPS/serviço persistente.
+O painel publicado na Vercel **não mantém sessão WhatsApp por QR**. Com `WHATSAPP_PROVIDER=meta`, o envio usa templates aprovados e os status de entrega e respostas chegam por `POST /api/whatsapp/meta/webhook`. Com `WA_SERVER_URL` configurado, o indicador da aba **Offline** consulta `/status` do servidor persistente e cada alerta exibe `na fila → enviada → entregue → lida` (ou `falhou` / `sem confirmação`) conforme os eventos assinados recebidos em `POST /api/whatsapp/webhook`. Sem webhook, o envio aceito não equivale a uma entrega. O botão **Conectar** da Central WhatsApp retorna `503` por design.
 
-O adaptador Meta devolve `deliveryStatus: "sent"` quando a Cloud API aceita a mensagem e retorna um id. Isso não é confirmação de entrega no aparelho; `unconfirmed` fica reservado ao timeout do receipt no Baileys local.
+O adaptador Meta devolve `deliveryStatus: "pendente"` quando a Cloud API aceita a mensagem e retorna um id. O status só avança com o webhook de entrega; `unconfirmed` fica reservado ao timeout do receipt no Baileys local. A Vercel permite envio manual e recebimento do webhook, mas não executa os bots locais nem mantém workers em segundo plano.
 
 **Sem Postgres remoto configurado**, o adaptador usa `db-memory.js`: o painel e as APIs respondem normalmente, mas os dados **não persistem** entre invocações/instâncias. O `/api/health` indica `"storage":"memory"`. Para persistência, configure as variáveis acima com um banco alcançável pela Vercel.
 
