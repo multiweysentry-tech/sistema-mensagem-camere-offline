@@ -3,17 +3,11 @@
 const { proto } = require('@whiskeysockets/baileys');
 const { randomBytes } = require('crypto');
 const { normalizarContato } = require('./phone-utils');
+const { OPTION_BUTTONS, OPTION_FOOTER } = require('./wa-options');
 
 const deliveryAckStatus = proto.WebMessageInfo.Status.DELIVERY_ACK;
 const errorStatus = proto.WebMessageInfo.Status.ERROR;
 const deliveryWaiters = new Map();
-
-const OPTION_BUTTONS = [
-  { id: '1', text: 'Estou verificando' },
-  { id: '2', text: 'Preciso de suporte' },
-  { id: '3', text: 'Já resolvi' }
-];
-const OPTION_FOOTER = 'Escolha uma opção. PARAR encerra as mensagens.';
 
 function interactiveReplyText(message = {}) {
   const response = message.interactiveResponseMessage;

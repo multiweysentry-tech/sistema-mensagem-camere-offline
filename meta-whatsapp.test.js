@@ -5,6 +5,10 @@ const express = require('express');
 const { createMetaWhatsapp } = require('./lib/meta-whatsapp');
 const { registerMetaWebhook } = require('./lib/meta-webhook');
 
+test('Meta adapter loads without importing the Baileys protocol', () => {
+  assert.equal(require.cache[require.resolve('./wa-protocol')], undefined);
+});
+
 async function withServer(app, callback) {
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {
