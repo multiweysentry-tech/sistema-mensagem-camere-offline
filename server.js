@@ -73,13 +73,39 @@ function createApp(options = {}) {
   const db = options.db || require('./db');
   const wa = options.wa || require('./whatsapp');
   const bots = options.bots || require('./bots');
+  const auth = options.auth || null;
+  const sessionManager = options.sessionManager || null;
   const app = express();
   const whatsappSendsInProgress = new Set();
   const server = http.createServer(app);
   const io = new Server(server);
 
-  wa.setIO(io);
-  io.on('connection', socket => socket.emit('wa:status', wa.getStatus()));
+  if (sessionManager) sessionManager.setIO(io);
+  else wa.setIO(io);
+
+  io.on('connection', async socket => {
+    try {
+      const identity = auth
+        ? await auth.socketAuthorize(socket)
+        : { tenantId: options.tenantId || 'default' };
+      socket.join(`tenant:${identity.tenantId}`);
+      if (sessionManager) {
+        socket.emit('wa:status', sessionManager.list(identity.tenantId));
+      } else {
+        socket.emit('wa:status', wa.getStatus());
+      }
+    } catch (error) {
+      socket.emit('wa:error', { erro: 'Nao autorizado' });
+      socket.disconnect(true);
+    }
+  });
+
+  // Resolve a instancia WhatsApp da requisicao, isolada por tenant.
+  function instanceFor(req) {
+    const instanceId = String(req.body?.instanceId || req.query?.instanceId || 'default');
+    if (sessionManager) return sessionManager.getOrCreate(req.tenantId || 'default', instanceId);
+    return wa;
+  }
 
   app.use(express.json({ limit: '1mb' }));
   app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
@@ -94,15 +120,30 @@ function createApp(options = {}) {
     next(err);
   });
 
-  const apiKey = options.apiKey ?? process.env.API_KEY;
-  app.use('/api', (req, res, next) => {
-    if (!apiKey || req.get('x-api-key') === apiKey) return next();
-    return res.status(401).json({ codigo: 'UNAUTHORIZED', erro: 'Nao autorizado' });
-  });
+  if (auth) {
+    app.use('/api', (req, res, next) => {
+      req.tenantId = req.user?.tenantId || options.tenantId || 'default';
+      next();
+    });
+    app.use('/api', auth.middleware);
+    auth.registerRoutes(app);
+  } else {
+    const apiKey = options.apiKey ?? process.env.API_KEY;
+    app.use('/api', (req, res, next) => {
+      req.tenantId = options.tenantId || 'default';
+      if (!apiKey || req.get('x-api-key') === apiKey) return next();
+      return res.status(401).json({ codigo: 'UNAUTHORIZED', erro: 'Nao autorizado' });
+    });
+    // Modo desenvolvimento sem ADMIN_*: o painel permanece aberto e informa
+    // ao frontend que nao ha autenticacao obrigatoria.
+    app.get('/api/auth/me', (req, res) => res.json({ user: null, required: false }));
+    app.post('/api/auth/login', (req, res) => res.status(400).json({ codigo: 'AUTH_DISABLED', erro: 'Autenticacao nao configurada neste servidor' }));
+    app.post('/api/auth/logout', (req, res) => res.json({ ok: true }));
+  }
 
   app.get('/api/health', async (req, res) => {
     try {
-      const cameras = await db.getCameras();
+      const cameras = await db.getCameras(req.tenantId);
       const body = { status: 'ok', cameras: cameras.length };
       if (db.mode) body.storage = db.mode;
       res.json(body);
@@ -113,7 +154,7 @@ function createApp(options = {}) {
 
   app.get('/api/cameras', async (req, res) => {
     try {
-      let list = await db.getCameras();
+      let list = await db.getCameras(req.tenantId);
       const { status, responsavel, q } = req.query;
       if (status) list = list.filter(camera => String(camera.status) === String(status));
       if (responsavel) {
@@ -132,7 +173,7 @@ function createApp(options = {}) {
 
   app.get('/api/cameras/:id', async (req, res) => {
     try {
-      const camera = (await db.getCameras()).find(item => String(item.id) === req.params.id);
+      const camera = (await db.getCameras(req.tenantId)).find(item => String(item.id) === req.params.id);
       if (!camera) return res.status(404).json({ codigo: 'NOT_FOUND', erro: 'Camera nao encontrada' });
       return res.json(camera);
     } catch (error) {
@@ -145,7 +186,7 @@ function createApp(options = {}) {
     if (errors.length) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erros: errors });
     try {
       const normalizedId = String(req.body.id).trim();
-      const list = await db.getCameras();
+      const list = await db.getCameras(req.tenantId);
       const exists = list.some(camera => String(camera.id) === normalizedId);
       await db.upsertCamera({
         ...req.body,
@@ -158,9 +199,9 @@ function createApp(options = {}) {
         ultima_cobranca: req.body.ultima_cobranca || '',
         data_resolucao: req.body.data_resolucao || '',
         observacoes: req.body.observacoes || ''
-      });
-      await db.ensureConsent(normalizePhone(req.body.responsavel_telefone));
-      const camera = (await db.getCameras()).find(item => String(item.id) === normalizedId);
+      }, req.tenantId);
+      await db.ensureConsent(normalizePhone(req.body.responsavel_telefone), req.tenantId);
+      const camera = (await db.getCameras(req.tenantId)).find(item => String(item.id) === normalizedId);
       return res.status(exists ? 200 : 201).json({ camera });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
@@ -168,7 +209,7 @@ function createApp(options = {}) {
   });
 
   app.put('/api/cameras/:id', async (req, res) => {
-    const existing = (await db.getCameras()).find(camera => String(camera.id) === req.params.id);
+    const existing = (await db.getCameras(req.tenantId)).find(camera => String(camera.id) === req.params.id);
     if (!existing) return res.status(404).json({ codigo: 'NOT_FOUND', erro: 'Camera nao encontrada' });
     const fields = Object.fromEntries(
       Object.entries(req.body || {}).filter(([key]) => CAMERA_FIELDS.has(key))
@@ -179,8 +220,8 @@ function createApp(options = {}) {
       fields.responsavel_telefone = normalizePhone(fields.responsavel_telefone);
     }
     try {
-      await db.updateCamera(req.params.id, fields);
-      const camera = (await db.getCameras()).find(item => String(item.id) === req.params.id);
+      await db.updateCamera(req.params.id, fields, req.tenantId);
+      const camera = (await db.getCameras(req.tenantId)).find(item => String(item.id) === req.params.id);
       return res.json({ camera });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
@@ -189,9 +230,9 @@ function createApp(options = {}) {
 
   app.delete('/api/cameras/:id', async (req, res) => {
     try {
-      const camera = (await db.getCameras()).find(item => String(item.id) === req.params.id);
+      const camera = (await db.getCameras(req.tenantId)).find(item => String(item.id) === req.params.id);
       if (!camera) return res.status(404).json({ codigo: 'NOT_FOUND', erro: 'Camera nao encontrada' });
-      await db.deleteCamera(req.params.id);
+      await db.deleteCamera(req.params.id, req.tenantId);
       return res.json({ camera });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
@@ -200,7 +241,7 @@ function createApp(options = {}) {
 
   app.get('/api/log', async (req, res) => {
     try {
-      let list = await db.getLog();
+      let list = await db.getLog(req.tenantId);
       const { acao, camera_id: cameraId, limit } = req.query;
       if (acao) list = list.filter(entry => String(entry.acao) === String(acao));
       if (cameraId) list = list.filter(entry => String(entry.camera_id || '').split(',').includes(String(cameraId)));
@@ -225,28 +266,43 @@ function createApp(options = {}) {
         acao: String(req.body.acao || '').trim()
       };
       if (!entry.acao) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'acao obrigatoria' });
-      await db.addLog(entry);
+      await db.addLog(entry, req.tenantId);
       return res.status(201).json({ log: entry });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
   });
 
-  app.get('/api/whatsapp/status', (req, res) => res.json(wa.getStatus()));
+  app.get('/api/whatsapp/status', (req, res) => {
+    const status = instanceFor(req).getStatus();
+    if (!sessionManager) return res.json(status);
+    return res.json({ ...status, instances: sessionManager.list(req.tenantId) });
+  });
   app.post('/api/whatsapp/connect', async (req, res) => {
     try {
-      await wa.connect();
-      return res.json({ ok: true, status: wa.getStatus() });
+      const instance = instanceFor(req);
+      await instance.connect();
+      return res.json({ ok: true, status: instance.getStatus() });
     } catch (error) {
       return res.status(503).json({ codigo: 'WHATSAPP_CONNECT_FAILED', erro: error.message });
     }
   });
   app.post('/api/whatsapp/disconnect', async (req, res) => {
     try {
-      await wa.disconnect();
+      // Desconexao manual preserva as credenciais por padrao.
+      await instanceFor(req).disconnect({ logout: req.body?.logout === true });
       return res.json({ ok: true });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
+    }
+  });
+  app.post('/api/whatsapp/qr', async (req, res) => {
+    try {
+      const instance = instanceFor(req);
+      await instance.refreshQR();
+      return res.json({ ok: true, status: instance.getStatus() });
+    } catch (error) {
+      return res.status(503).json({ codigo: 'WHATSAPP_QR_FAILED', erro: error.message });
     }
   });
   app.post('/api/whatsapp/send', async (req, res) => {
@@ -256,7 +312,7 @@ function createApp(options = {}) {
       return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe um telefone e uma mensagem valida (ate 4096 caracteres)' });
     }
     try {
-      const result = await wa.sendMessage(String(to), text.trim());
+      const result = await instanceFor(req).sendMessage(String(to), text.trim());
       return res.json(result);
     } catch (error) {
       return res.status(503).json({ codigo: 'WHATSAPP_SEND_FAILED', erro: error.message });
@@ -273,29 +329,30 @@ function createApp(options = {}) {
     }
     const phone = normalizePhone(to);
     try {
-      if (await db.isBlocked(phone)) {
+      if (await db.isBlocked(phone, req.tenantId)) {
         return res.status(403).json({ codigo: 'CONTACT_BLOCKED', erro: 'Contato bloqueado para mensagens' });
       }
-      if (!(await db.hasConsent(phone))) {
+      if (!(await db.hasConsent(phone, req.tenantId))) {
         return res.status(403).json({ codigo: 'CONSENT_REQUIRED', erro: 'Contato sem consentimento registrado' });
       }
     } catch (error) {
       return res.status(500).json({ codigo: 'CONSENT_CHECK_FAILED', erro: error.message });
     }
-    if (whatsappSendsInProgress.has(phone)) {
+    const sendKey = `${req.tenantId || 'default'}::${req.body?.instanceId || 'default'}::${phone}`;
+    if (whatsappSendsInProgress.has(sendKey)) {
       return res.status(409).json({
         codigo: 'WHATSAPP_SEND_IN_PROGRESS',
         erro: 'Ja existe um envio em andamento para este contato'
       });
     }
-    whatsappSendsInProgress.add(phone);
+    whatsappSendsInProgress.add(sendKey);
     try {
-      const result = await wa.sendWithOptions(String(to), text.trim(), buttons, footer);
+      const result = await instanceFor(req).sendWithOptions(String(to), text.trim(), buttons, footer);
       return res.status(result.deliveryStatus === 'unconfirmed' ? 202 : 200).json(result);
     } catch (error) {
       return res.status(503).json({ codigo: 'WHATSAPP_SEND_FAILED', erro: error.message });
     } finally {
-      whatsappSendsInProgress.delete(phone);
+      whatsappSendsInProgress.delete(sendKey);
     }
   });
   app.get('/api/whatsapp/check/:phone', async (req, res) => {
@@ -304,14 +361,14 @@ function createApp(options = {}) {
       return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Telefone invalido' });
     }
     try {
-      return res.json(await wa.checkNumber(phone));
+      return res.json(await instanceFor(req).checkNumber(phone));
     } catch (error) {
       return res.status(503).json({ codigo: 'WHATSAPP_CHECK_FAILED', erro: error.message });
     }
   });
   app.get('/api/whatsapp/conversations', async (req, res) => {
     try {
-      let list = await db.getConversations();
+      let list = await db.getConversations(req.tenantId);
       const q = req.query.q;
       if (q) list = list.filter(c => (c.name||'').toLowerCase().includes(q.toLowerCase()) || (c.jid||'').includes(q));
       return res.json(list);
@@ -322,10 +379,10 @@ function createApp(options = {}) {
   app.get('/api/whatsapp/history/:phone', async (req, res) => {
     try {
       const phone = req.params.phone.replace(/\D/g,'');
-      const convs = await db.getConversations();
+      const convs = await db.getConversations(req.tenantId);
       const conv = convs.find(c => c.jid.includes(phone));
       if (!conv) return res.json({ messages: [], conversation: null });
-      const msgs = await db.getMessages(conv.jid);
+      const msgs = await db.getMessages(conv.jid, req.tenantId);
       return res.json({ conversation: conv, messages: msgs });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
@@ -333,14 +390,14 @@ function createApp(options = {}) {
   });
   app.get('/api/whatsapp/messages/:jid', async (req, res) => {
     try {
-      return res.json(await db.getMessages(req.params.jid));
+      return res.json(await db.getMessages(req.params.jid, req.tenantId));
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
   });
   app.post('/api/whatsapp/read/:jid', async (req, res) => {
     try {
-      await db.markRead(req.params.jid);
+      await db.markRead(req.params.jid, req.tenantId);
       return res.json({ ok: true });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
@@ -353,9 +410,9 @@ function createApp(options = {}) {
       return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe um telefone valido e opted_in booleano' });
     }
     try {
-      await db.setConsent(normalizePhone(phone), optedIn);
-      if (!optedIn) await db.block(normalizePhone(phone), 'Opt-out solicitado');
-      else await db.unblock(normalizePhone(phone));
+      await db.setConsent(normalizePhone(phone), optedIn, req.tenantId);
+      if (!optedIn) await db.block(normalizePhone(phone), 'Opt-out solicitado', req.tenantId);
+      else await db.unblock(normalizePhone(phone), req.tenantId);
       return res.json({ ok: true });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
@@ -364,14 +421,14 @@ function createApp(options = {}) {
   app.get('/api/consent/:phone', async (req, res) => {
     if (!validPhone(req.params.phone)) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Telefone invalido' });
     try {
-      return res.json({ opted_in: await db.hasConsent(normalizePhone(req.params.phone)) });
+      return res.json({ opted_in: await db.hasConsent(normalizePhone(req.params.phone), req.tenantId) });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
   });
   app.get('/api/consents', async (req, res) => {
     try {
-      return res.json(await db.getConsents());
+      return res.json(await db.getConsents(req.tenantId));
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
@@ -380,8 +437,8 @@ function createApp(options = {}) {
     const { phone, reason } = req.body || {};
     if (!validPhone(phone)) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Telefone invalido' });
     try {
-      await db.block(normalizePhone(phone), String(reason || '').slice(0, 500));
-      await db.setConsent(normalizePhone(phone), false);
+      await db.block(normalizePhone(phone), String(reason || '').slice(0, 500), req.tenantId);
+      await db.setConsent(normalizePhone(phone), false, req.tenantId);
       return res.json({ ok: true });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
@@ -390,7 +447,7 @@ function createApp(options = {}) {
   app.delete('/api/blocklist/:phone', async (req, res) => {
     if (!validPhone(req.params.phone)) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Telefone invalido' });
     try {
-      await db.unblock(normalizePhone(req.params.phone));
+      await db.unblock(normalizePhone(req.params.phone), req.tenantId);
       return res.json({ ok: true });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
@@ -398,7 +455,7 @@ function createApp(options = {}) {
   });
   app.get('/api/blocklist', async (req, res) => {
     try {
-      return res.json(await db.getBlocklist());
+      return res.json(await db.getBlocklist(req.tenantId));
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
@@ -406,14 +463,14 @@ function createApp(options = {}) {
 
   app.get('/api/templates', async (req, res) => {
     try {
-      return res.json(await db.getTemplates());
+      return res.json(await db.getTemplates(req.tenantId));
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
   });
   app.get('/api/templates/:id', async (req, res) => {
     try {
-      const template = await db.getTemplate(req.params.id);
+      const template = await db.getTemplate(req.params.id, req.tenantId);
       if (!template) return res.status(404).json({ codigo: 'NOT_FOUND', erro: 'Modelo nao encontrado' });
       return res.json(template);
     } catch (error) {
@@ -435,7 +492,7 @@ function createApp(options = {}) {
         nome: String(tpl.nome).trim(),
         corpo: String(tpl.corpo),
         variaveis: String(tpl.variaveis || '')
-      });
+      }, req.tenantId);
       return res.json({ ok: true });
     } catch (error) {
       return res.status(400).json({ erro: error.message });
@@ -453,7 +510,7 @@ function createApp(options = {}) {
         nome: String(tpl.nome).trim(),
         corpo: String(tpl.corpo),
         variaveis: String(tpl.variaveis || '')
-      });
+      }, req.tenantId);
       return res.json({ ok: true });
     } catch (error) {
       return res.status(400).json({ erro: error.message });
@@ -461,7 +518,7 @@ function createApp(options = {}) {
   });
   app.delete('/api/templates/:id', async (req, res) => {
     try {
-      await db.deleteTemplate(req.params.id);
+      await db.deleteTemplate(req.params.id, req.tenantId);
       return res.json({ ok: true });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
@@ -469,7 +526,7 @@ function createApp(options = {}) {
   });
   app.post('/api/templates/:id/render', async (req, res) => {
     try {
-      const template = await db.getTemplate(req.params.id);
+      const template = await db.getTemplate(req.params.id, req.tenantId);
       if (!template) return res.status(404).json({ codigo: 'NOT_FOUND', erro: 'Modelo nao encontrado' });
       return res.json({ text: db.renderTemplate(template.corpo, req.body.vars || {}) });
     } catch (error) {
@@ -479,14 +536,14 @@ function createApp(options = {}) {
 
   app.post('/api/bots/billing/run', async (req, res) => {
     try {
-      return res.json({ ok: true, result: await bots.runBillingBot({ force: true }) });
+      return res.json({ ok: true, result: await bots.runBillingBot({ force: true, tenantId: req.tenantId, instanceId: String(req.body?.instanceId || 'default') }) });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
   });
   app.post('/api/bots/maintenance/run', async (req, res) => {
     try {
-      return res.json({ ok: true, result: await bots.runMaintenanceBot({ force: true }) });
+      return res.json({ ok: true, result: await bots.runMaintenanceBot({ force: true, tenantId: req.tenantId, instanceId: String(req.body?.instanceId || 'default') }) });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
@@ -500,7 +557,7 @@ function createApp(options = {}) {
   });
   app.get('/api/bots/config', async (req, res) => {
     try {
-      return res.json(await db.getBotConfig());
+      return res.json(await db.getBotConfig(req.tenantId));
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
@@ -553,7 +610,7 @@ function createApp(options = {}) {
       }
     }
     try {
-      const config = await db.getBotConfig();
+      const config = await db.getBotConfig(req.tenantId);
       const proposed = { ...config, ...Object.fromEntries(entries) };
       if (Number(proposed.business_hours_start) >= Number(proposed.business_hours_end)) {
         return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'O fim do horario comercial deve ser posterior ao inicio' });
@@ -567,7 +624,7 @@ function createApp(options = {}) {
           return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe um intervalo temporario valido para a data selecionada' });
         }
       }
-      for (const [key, value] of entries) await db.setBotConfig(key, value);
+      for (const [key, value] of entries) await db.setBotConfig(key, value, req.tenantId);
       return res.json({ ok: true });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
@@ -575,7 +632,115 @@ function createApp(options = {}) {
   });
   app.get('/api/reports', async (req, res) => {
     try {
-      return res.json(await db.getReports());
+      return res.json(await db.getReports(req.tenantId));
+    } catch (error) {
+      return res.status(500).json({ erro: error.message });
+    }
+  });
+
+  // ---- Instancias WhatsApp (uma sessao isolada por numero) ----
+  function validInstanceId(value) {
+    return /^[a-zA-Z0-9_-]{1,64}$/.test(String(value || ''));
+  }
+
+  app.get('/api/instances', async (req, res) => {
+    try {
+      const stored = db.listInstances ? await db.listInstances() : [];
+      const statuses = sessionManager ? sessionManager.list(req.tenantId) : [];
+      const byId = new Map(statuses.map(item => [item.instanceId, item]));
+      const rows = stored.filter(row => String(row.tenant_id || 'default') === String(req.tenantId || 'default'));
+      const result = rows.map(row => ({
+        instanceId: row.instance_id,
+        label: row.label || row.instance_id,
+        autoConnect: Boolean(row.auto_connect),
+        ...(byId.get(row.instance_id) || { status: 'disconnected' })
+      }));
+      for (const status of statuses) {
+        if (!result.some(item => item.instanceId === status.instanceId)) {
+          result.push({ instanceId: status.instanceId, label: status.instanceId, autoConnect: false, ...status });
+        }
+      }
+      return res.json(result);
+    } catch (error) {
+      return res.status(500).json({ erro: error.message });
+    }
+  });
+
+  app.post('/api/instances', async (req, res) => {
+    const instanceId = String(req.body?.instanceId || '').trim();
+    if (!validInstanceId(instanceId)) {
+      return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'instanceId deve conter ate 64 letras, numeros, _ ou -' });
+    }
+    try {
+      if (db.upsertInstance) {
+        await db.upsertInstance({
+          tenantId: req.tenantId,
+          instanceId,
+          label: String(req.body?.label || '').slice(0, 120),
+          autoConnect: Boolean(req.body?.autoConnect)
+        });
+      }
+      if (sessionManager) sessionManager.getOrCreate(req.tenantId, instanceId);
+      return res.status(201).json({ ok: true, instanceId });
+    } catch (error) {
+      return res.status(500).json({ erro: error.message });
+    }
+  });
+
+  app.post('/api/instances/:instanceId/connect', async (req, res) => {
+    if (!validInstanceId(req.params.instanceId)) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'instanceId invalido' });
+    if (!sessionManager) return res.status(503).json({ codigo: 'UNAVAILABLE', erro: 'Gerenciador de instancias indisponivel' });
+    try {
+      const instance = sessionManager.getOrCreate(req.tenantId, req.params.instanceId);
+      await instance.connect();
+      return res.json({ ok: true, status: instance.getStatus() });
+    } catch (error) {
+      return res.status(503).json({ codigo: 'WHATSAPP_CONNECT_FAILED', erro: error.message });
+    }
+  });
+
+  app.post('/api/instances/:instanceId/disconnect', async (req, res) => {
+    if (!validInstanceId(req.params.instanceId)) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'instanceId invalido' });
+    if (!sessionManager) return res.status(503).json({ codigo: 'UNAVAILABLE', erro: 'Gerenciador de instancias indisponivel' });
+    try {
+      const instance = sessionManager.get(req.tenantId, req.params.instanceId);
+      if (!instance) return res.status(404).json({ codigo: 'NOT_FOUND', erro: 'Instancia nao encontrada' });
+      await instance.disconnect({ logout: false });
+      return res.json({ ok: true, status: instance.getStatus() });
+    } catch (error) {
+      return res.status(500).json({ erro: error.message });
+    }
+  });
+
+  app.post('/api/instances/:instanceId/qr', async (req, res) => {
+    if (!validInstanceId(req.params.instanceId)) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'instanceId invalido' });
+    if (!sessionManager) return res.status(503).json({ codigo: 'UNAVAILABLE', erro: 'Gerenciador de instancias indisponivel' });
+    try {
+      const instance = sessionManager.getOrCreate(req.tenantId, req.params.instanceId);
+      await instance.refreshQR();
+      return res.json({ ok: true, status: instance.getStatus() });
+    } catch (error) {
+      return res.status(503).json({ codigo: 'WHATSAPP_QR_FAILED', erro: error.message });
+    }
+  });
+
+  app.delete('/api/instances/:instanceId', async (req, res) => {
+    if (!validInstanceId(req.params.instanceId)) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'instanceId invalido' });
+    if (!sessionManager) return res.status(503).json({ codigo: 'UNAVAILABLE', erro: 'Gerenciador de instancias indisponivel' });
+    try {
+      const removed = await sessionManager.remove(req.tenantId, req.params.instanceId, { logout: true });
+      if (db.deleteInstance) await db.deleteInstance(req.tenantId, req.params.instanceId);
+      return res.json({ ok: true, removed });
+    } catch (error) {
+      return res.status(500).json({ erro: error.message });
+    }
+  });
+
+  app.get('/api/jobs', async (req, res) => {
+    try {
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+      const jobs = db.listJobs ? await db.listJobs(req.tenantId, limit) : [];
+      return res.json(jobs);
     } catch (error) {
       return res.status(500).json({ erro: error.message });
     }
@@ -598,26 +763,89 @@ function createApp(options = {}) {
 module.exports = { createApp };
 
 if (require.main === module) {
+  const { log } = require('./logger');
+  const { createAuth } = require('./auth');
+  const { createSessionManager } = require('./session-manager');
+  const { createQueue } = require('./queue');
+  const botsModule = require('./bots');
+
   const host = process.env.HOST || '127.0.0.1';
   const port = Number(process.env.PORT || 3000);
   const loopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
-  if (!loopback && (!process.env.API_KEY || process.env.API_KEY.length < 32)) {
-    throw new Error('Defina uma API_KEY com pelo menos 32 caracteres antes de aceitar conexoes de outras maquinas');
+  if (!loopback && (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD)) {
+    throw new Error('Defina ADMIN_EMAIL e ADMIN_PASSWORD antes de expor o servidor fora de localhost');
   }
 
   const db = require('./db');
   const wa = require('./whatsapp');
-  const bots = require('./bots');
-  const app = createApp({ db, wa, bots });
+  const auth = process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD ? createAuth({ db }) : null;
 
-  db.init().then(() => {
+  let bots = botsModule;
+  const sessionManager = createSessionManager({
+    db,
+    resolveBots: () => bots
+  });
+  bots = botsModule.createBots({
+    db,
+    wa: sessionManager.getOrCreate('default', 'default'),
+    resolveWa: ({ tenantId, instanceId }) => sessionManager.getOrCreate(tenantId, instanceId),
+    listInstances: () => db.listInstances()
+  });
+
+  const app = createApp({ db, wa, bots, auth, sessionManager });
+  const queue = createQueue({ db, workerId: `sentry-${process.pid}`, pollMs: 1500 });
+
+  queue.register('send_text', async payload => {
+    const instance = sessionManager.getOrCreate(payload.tenantId || 'default', payload.instanceId || 'default');
+    await instance.sendMessage(payload.to, payload.text);
+  });
+  queue.register('send_options', async payload => {
+    const instance = sessionManager.getOrCreate(payload.tenantId || 'default', payload.instanceId || 'default');
+    await instance.sendWithOptions(payload.to, payload.text, payload.buttons, payload.footer);
+  });
+  queue.register('run_billing', async payload => bots.runBillingBot({
+    force: true, tenantId: payload.tenantId || 'default', instanceId: payload.instanceId || 'default'
+  }));
+  queue.register('run_maintenance', async payload => bots.runMaintenanceBot({
+    force: true, tenantId: payload.tenantId || 'default', instanceId: payload.instanceId || 'default'
+  }));
+
+  process.on('unhandledRejection', reason => log('error', 'process.unhandled_rejection', { error: reason }));
+  process.on('uncaughtException', error => {
+    log('error', 'process.uncaught_exception', { error });
+    process.exit(1);
+  });
+
+  async function shutdown() {
+    queue.stop();
+    await Promise.allSettled(sessionManager.all().map(session => session.disconnect({ logout: false })));
+    app.server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  }
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  async function start() {
+    await db.init();
+    if (auth) await auth.bootstrapAdmin();
+    else log('warn', 'auth.disabled', { reason: 'ADMIN_EMAIL/ADMIN_PASSWORD ausentes; acesso restrito a loopback' });
+
+    // A instancia padrao reaproveita o auth_info existente e e restaurada no boot.
+    await db.upsertInstance({
+      tenantId: 'default', instanceId: 'default', label: 'WhatsApp principal', autoConnect: true
+    });
+
     app.server.listen(port, host, () => {
       console.log(`Servidor rodando em http://${host}:${port}`);
-      bots.startSchedulers().catch(error => console.error('[Bots] Nao foi possivel iniciar os agendadores:', error.message));
-      wa.connect().catch(error => console.error('[WhatsApp] Falha inicial de conexao:', error.message));
+      log('info', 'server.listening', { host, port, auth: Boolean(auth) });
+      bots.startSchedulers().catch(error => log('error', 'bots.scheduler_failed', { error }));
+      sessionManager.restore().catch(error => log('error', 'wa.restore_failed', { error }));
+      queue.start();
     });
-  }).catch(error => {
-    console.error('[DB] Falha ao inicializar o banco:', error.message);
+  }
+
+  start().catch(error => {
+    log('error', 'server.start_failed', { error });
     process.exitCode = 1;
     app.io.close();
   });

@@ -11,16 +11,32 @@ const state = {
   consent: new Map(),
   blocklist: new Map(),
   templates: new Map(),
-  botConfig: new Map()
+  botConfig: new Map(),
+  users: new Map(),
+  userSessions: new Map(),
+  instances: new Map(),
+  jobs: new Map()
 };
 
 const CAMERA_FIELDS = ['camera_nome', 'local', 'responsavel_nome', 'responsavel_telefone', 'email', 'status', 'tentativas', 'ultima_cobranca', 'data_resolucao', 'observacoes'];
+
+function tenant(value) {
+  return String(value || 'default');
+}
+
+// Identificadores de tenants nao-default sao prefixados, exatamente como em db.js.
+function scopedKey(value, tenantId) {
+  if (value === null || value === undefined) return value;
+  const t = tenant(tenantId);
+  return t === 'default' ? String(value) : `${t}::${String(value)}`;
+}
 
 async function init() {
   const now = new Date().toISOString();
   if (!state.templates.has('cobranca_padrao')) {
     state.templates.set('cobranca_padrao', {
       id: 'cobranca_padrao',
+      tenant_id: 'default',
       nome: 'Cobrança de câmeras offline',
       corpo: 'Olá, {nome_cliente}!\nO Sentry identificou que estas câmeras estão offline:\n{lista_cameras}\n\nO que você prefere fazer?\n1. Estou analisando\n2. Preciso falar com técnico\n3. Já resolvi',
       variaveis: 'nome_cliente,lista_cameras',
@@ -30,46 +46,55 @@ async function init() {
   }
   const defaults = { billing_days_before: '3', billing_days_after: '1,3,7', billing_hour: '9', maintenance_hour: '17', auto_mode: 'true', max_attempts: '3', business_hours_start: '8', business_hours_end: '18' };
   for (const [key, value] of Object.entries(defaults)) {
-    if (!state.botConfig.has(key)) state.botConfig.set(key, { key, value, updated_at: now });
+    if (!state.botConfig.has(key)) state.botConfig.set(key, { key, tenant_id: 'default', value, updated_at: now });
   }
   console.log('[DB] Schema em memoria pronto (dados nao persistem no Vercel)');
 }
 
-async function getCameras() {
-  return [...state.cameras.values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+async function getCameras(tenantId = 'default') {
+  return [...state.cameras.values()]
+    .filter(row => row.tenant_id === tenant(tenantId))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
 }
 
-async function upsertCamera(cam) {
-  const current = state.cameras.get(cam.id) || {};
-  const row = { id: cam.id };
+async function upsertCamera(cam, tenantId = 'default') {
+  const id = scopedKey(cam.id, tenantId);
+  const current = state.cameras.get(id) || {};
+  const row = { id, tenant_id: tenant(tenantId), instance_id: cam.instance_id || current.instance_id || 'default' };
   for (const field of CAMERA_FIELDS) row[field] = cam[field] ?? current[field] ?? '';
   if (row.status === undefined || row.status === '') row.status = 'Pendente';
-  state.cameras.set(cam.id, row);
+  state.cameras.set(id, row);
 }
 
-async function updateCamera(id, fields) {
-  const current = state.cameras.get(id);
-  if (!current) return;
+async function updateCamera(id, fields, tenantId = 'default') {
+  const current = state.cameras.get(scopedKey(id, tenantId));
+  if (!current || current.tenant_id !== tenant(tenantId)) return;
   for (const field of CAMERA_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(fields, field)) current[field] = fields[field];
   }
 }
 
-async function deleteCamera(id) {
-  state.cameras.delete(id);
+async function deleteCamera(id, tenantId = 'default') {
+  const key = scopedKey(id, tenantId);
+  const row = state.cameras.get(key);
+  if (row && row.tenant_id === tenant(tenantId)) state.cameras.delete(key);
 }
 
-async function addLog(entry) {
-  state.log.push({ id: state.log.length + 1, ...entry });
+async function addLog(entry, tenantId = 'default') {
+  state.log.push({ id: state.log.length + 1, tenant_id: tenant(tenantId), ...entry });
 }
 
-async function getLog() {
-  return [...state.log].reverse().slice(0, 200);
+async function getLog(tenantId = 'default') {
+  return [...state.log]
+    .filter(row => row.tenant_id === tenant(tenantId))
+    .reverse()
+    .slice(0, 500);
 }
 
-async function hasRecentLog(phone, actions, since) {
+async function hasRecentLog(phone, actions, since, tenantId = 'default') {
   const limit = new Date(since).getTime();
   return state.log.some(entry =>
+    entry.tenant_id === tenant(tenantId) &&
     entry.responsavel_telefone === phone &&
     actions.includes(entry.acao) &&
     !Number.isNaN(new Date(entry.timestamp).getTime()) &&
@@ -77,90 +102,124 @@ async function hasRecentLog(phone, actions, since) {
   );
 }
 
-async function getConversations() {
+async function getConversations(tenantId = 'default') {
   return [...state.conversations.values()]
-    .map(c => ({ jid: c.jid, name: c.name, lastMessage: c.last_message, lastTime: c.last_time, unread: c.unread }))
+    .filter(c => c.tenant_id === tenant(tenantId))
+    .map(c => ({ jid: c.jid, name: c.name, lastMessage: c.last_message, lastTime: c.last_time, unread: c.unread, instanceId: c.instance_id }))
     .sort((a, b) => String(b.lastTime).localeCompare(String(a.lastTime)));
 }
 
-async function upsertConversation(jid, name, lastMessage, lastTime) {
-  const current = state.conversations.get(jid) || { jid, unread: 0 };
-  state.conversations.set(jid, { ...current, jid, name, last_message: lastMessage, last_time: lastTime });
+async function upsertConversation(jid, name, lastMessage, lastTime, tenantId = 'default', instanceId = 'default') {
+  const key = scopedKey(jid, tenantId);
+  const current = state.conversations.get(key) || { jid: key, unread: 0 };
+  state.conversations.set(key, {
+    ...current,
+    jid: key,
+    tenant_id: tenant(tenantId),
+    instance_id: String(instanceId || 'default'),
+    name,
+    last_message: lastMessage,
+    last_time: lastTime
+  });
 }
 
-async function incrementUnread(jid) {
-  const current = state.conversations.get(jid);
-  if (current) current.unread = Number(current.unread || 0) + 1;
+async function incrementUnread(jid, tenantId = 'default') {
+  const current = state.conversations.get(scopedKey(jid, tenantId));
+  if (current && current.tenant_id === tenant(tenantId)) current.unread = Number(current.unread || 0) + 1;
 }
 
-async function getMessages(jid) {
+async function getMessages(jid, tenantId = 'default') {
+  const key = scopedKey(jid, tenantId);
   return [...state.messages.values()]
-    .filter(m => m.jid === jid)
+    .filter(m => m.jid === key && m.tenant_id === tenant(tenantId))
     .sort((a, b) => String(a.time).localeCompare(String(b.time)))
-    .map(m => ({ id: m.id, from: m.jid, text: m.text, time: m.time, direction: m.direction }));
+    .map(m => ({ id: m.id, from: m.jid, text: m.text, time: m.time, direction: m.direction, status: m.status }));
 }
 
-async function addMessage(jid, msg) {
-  if (state.messages.has(msg.id)) return false;
-  state.messages.set(msg.id, { ...msg, jid });
+async function addMessage(jid, msg, tenantId = 'default', instanceId = 'default') {
+  const id = scopedKey(msg.id, tenantId);
+  if (state.messages.has(id)) return false;
+  state.messages.set(id, {
+    ...msg,
+    id,
+    jid: scopedKey(jid, tenantId),
+    tenant_id: tenant(tenantId),
+    instance_id: String(instanceId || 'default')
+  });
   return true;
 }
 
-async function markRead(jid) {
-  const current = state.conversations.get(jid);
-  if (current) current.unread = 0;
+async function markRead(jid, tenantId = 'default') {
+  const current = state.conversations.get(scopedKey(jid, tenantId));
+  if (current && current.tenant_id === tenant(tenantId)) current.unread = 0;
 }
 
-async function isBlocked(phone) {
-  return state.blocklist.has(phone);
+async function isBlocked(phone, tenantId = 'default') {
+  const row = state.blocklist.get(scopedKey(phone, tenantId));
+  return Boolean(row && row.tenant_id === tenant(tenantId));
 }
 
-async function hasConsent(phone) {
-  return state.consent.get(phone)?.opted_in === 1;
+async function hasConsent(phone, tenantId = 'default') {
+  const row = state.consent.get(scopedKey(phone, tenantId));
+  return Boolean(row && row.tenant_id === tenant(tenantId) && Number(row.opted_in) === 1);
 }
 
-async function getConsents() {
+async function getConsents(tenantId = 'default') {
   return [...state.consent.values()]
+    .filter(row => row.tenant_id === tenant(tenantId))
     .map(row => ({ phone: row.phone, opted_in: Number(row.opted_in) === 1, updated_at: row.updated_at }))
     .sort((a, b) => String(a.phone).localeCompare(String(b.phone)));
 }
 
-async function setConsent(phone, optedIn) {
+async function setConsent(phone, optedIn, tenantId = 'default') {
   if (typeof optedIn !== 'boolean') throw new TypeError('optedIn deve ser booleano');
-  state.consent.set(phone, { phone, opted_in: optedIn ? 1 : 0, updated_at: new Date().toISOString() });
+  const key = scopedKey(phone, tenantId);
+  state.consent.set(key, { phone: key, tenant_id: tenant(tenantId), opted_in: optedIn ? 1 : 0, updated_at: new Date().toISOString() });
 }
 
-async function ensureConsent(phone) {
-  if (state.consent.has(phone) || state.blocklist.has(phone)) return false;
-  await setConsent(phone, true);
+async function ensureConsent(phone, tenantId = 'default') {
+  if (await isBlocked(phone, tenantId) || await hasConsent(phone, tenantId)) return false;
+  await setConsent(phone, true, tenantId);
   return true;
 }
 
-async function block(phone, reason) {
-  if (!state.blocklist.has(phone)) state.blocklist.set(phone, { phone, reason: reason || '', created_at: new Date().toISOString() });
+async function block(phone, reason, tenantId = 'default') {
+  const key = scopedKey(phone, tenantId);
+  if (!state.blocklist.has(key)) {
+    state.blocklist.set(key, { phone: key, tenant_id: tenant(tenantId), reason: reason || '', created_at: new Date().toISOString() });
+  }
 }
 
-async function unblock(phone) {
-  state.blocklist.delete(phone);
+async function unblock(phone, tenantId = 'default') {
+  const key = scopedKey(phone, tenantId);
+  const row = state.blocklist.get(key);
+  if (row && row.tenant_id === tenant(tenantId)) state.blocklist.delete(key);
 }
 
-async function getBlocklist() {
-  return [...state.blocklist.values()].sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+async function getBlocklist(tenantId = 'default') {
+  return [...state.blocklist.values()]
+    .filter(row => row.tenant_id === tenant(tenantId))
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
 }
 
-async function getTemplates() {
-  return [...state.templates.values()].sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
+async function getTemplates(tenantId = 'default') {
+  return [...state.templates.values()]
+    .filter(row => row.tenant_id === tenant(tenantId))
+    .sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
 }
 
-async function getTemplate(id) {
-  return state.templates.get(id) || null;
+async function getTemplate(id, tenantId = 'default') {
+  const row = state.templates.get(scopedKey(id, tenantId));
+  return row && row.tenant_id === tenant(tenantId) ? { ...row } : null;
 }
 
-async function upsertTemplate(tpl) {
+async function upsertTemplate(tpl, tenantId = 'default') {
+  const id = scopedKey(tpl.id, tenantId);
   const now = new Date().toISOString();
-  const current = state.templates.get(tpl.id);
-  state.templates.set(tpl.id, {
-    id: tpl.id,
+  const current = state.templates.get(id);
+  state.templates.set(id, {
+    id,
+    tenant_id: tenant(tenantId),
     nome: tpl.nome,
     corpo: tpl.corpo,
     variaveis: tpl.variaveis || '',
@@ -169,8 +228,10 @@ async function upsertTemplate(tpl) {
   });
 }
 
-async function deleteTemplate(id) {
-  state.templates.delete(id);
+async function deleteTemplate(id, tenantId = 'default') {
+  const key = scopedKey(id, tenantId);
+  const row = state.templates.get(key);
+  if (row && row.tenant_id === tenant(tenantId)) state.templates.delete(key);
 }
 
 function renderTemplate(corpo, vars) {
@@ -179,19 +240,34 @@ function renderTemplate(corpo, vars) {
   return out;
 }
 
-async function getBotConfig() {
+async function getBotConfig(tenantId = 'default') {
+  const t = tenant(tenantId);
   const cfg = {};
-  for (const [key, row] of state.botConfig) cfg[key] = row.value;
+  for (const [key, row] of state.botConfig) {
+    if (row.tenant_id !== t) continue;
+    const prefix = t === 'default' ? null : `${t}::`;
+    const name = prefix && key.startsWith(prefix) ? key.slice(prefix.length) : key;
+    cfg[name] = row.value;
+  }
   return cfg;
 }
 
-async function setBotConfig(key, value) {
-  state.botConfig.set(key, { key, value, updated_at: new Date().toISOString() });
+async function setBotConfig(key, value, tenantId = 'default') {
+  const storedKey = scopedKey(key, tenantId);
+  const current = state.botConfig.get(storedKey);
+  state.botConfig.set(storedKey, {
+    key: storedKey,
+    tenant_id: tenant(tenantId),
+    value,
+    updated_at: new Date().toISOString(),
+    created_at: current?.created_at || new Date().toISOString()
+  });
 }
 
-async function getReports() {
-  const cameras = [...state.cameras.values()];
-  const logs = [...state.log];
+async function getReports(tenantId = 'default') {
+  const t = tenant(tenantId);
+  const cameras = [...state.cameras.values()].filter(c => c.tenant_id === t);
+  const logs = [...state.log].filter(l => l.tenant_id === t);
   const counts = { Pendente: 0, 'Aguardando resposta': 0, Verificando: 0, Suporte: 0, 'Aguardando validacao': 0, Resolvido: 0 };
   for (const c of cameras) {
     const status = String(c.status || '').trim();
@@ -204,7 +280,7 @@ async function getReports() {
     tempoMedio = Math.round(total / resolvidas.length / 3600000);
   }
   const today = new Date().toISOString().slice(0, 10);
-  const todayMessages = [...state.messages.values()].filter(m => String(m.time).startsWith(today));
+  const todayMessages = [...state.messages.values()].filter(m => m.tenant_id === t && String(m.time).startsWith(today));
   return {
     counts,
     total: cameras.length,
@@ -215,13 +291,125 @@ async function getReports() {
     resolvidas: resolvidas.length,
     enviadasHoje: todayMessages.filter(m => m.direction === 'out').length,
     recebidasHoje: todayMessages.filter(m => m.direction === 'in').length,
-    clientesAguardando: [...state.conversations.values()].filter(c => Number(c.unread) > 0).length
+    clientesAguardando: [...state.conversations.values()].filter(c => c.tenant_id === t && Number(c.unread) > 0).length
   };
+}
+
+// ---- Autenticacao ----
+async function listUsers() {
+  return [...state.users.values()].map(row => ({ ...row }));
+}
+async function createUser(user) {
+  const row = { ...user, tenant_id: user.tenantId || user.tenant_id || 'default' };
+  state.users.set(row.id, row);
+  return getUserById(row.id);
+}
+async function getUserById(id) {
+  const row = state.users.get(id);
+  return row ? { ...row } : null;
+}
+async function getUserByEmail(email) {
+  const key = String(email || '').toLowerCase();
+  const row = [...state.users.values()].find(user => String(user.email).toLowerCase() === key);
+  return row ? { ...row } : null;
+}
+async function createSessionToken(userId, tokenHash, expiresAt) {
+  state.userSessions.set(tokenHash, { token_hash: tokenHash, user_id: userId, expires_at: expiresAt });
+}
+async function getSessionByToken(tokenHash) {
+  const session = state.userSessions.get(tokenHash);
+  if (!session || Date.parse(session.expires_at) <= Date.now()) return null;
+  return getUserById(session.user_id);
+}
+async function deleteSessionToken(tokenHash) {
+  state.userSessions.delete(tokenHash);
+}
+
+// ---- Instancias WhatsApp ----
+async function listInstances() {
+  return [...state.instances.values()].map(row => ({ ...row }));
+}
+async function upsertInstance(instance) {
+  const key = `${instance.tenantId || 'default'}::${instance.instanceId}`;
+  const current = state.instances.get(key) || {};
+  state.instances.set(key, {
+    tenant_id: instance.tenantId || 'default',
+    instance_id: instance.instanceId,
+    label: instance.label || current.label || '',
+    auto_connect: instance.autoConnect ? 1 : 0,
+    created_at: current.created_at || new Date().toISOString()
+  });
+}
+async function deleteInstance(tenantId, instanceId) {
+  state.instances.delete(`${tenantId || 'default'}::${instanceId}`);
+}
+
+// ---- Fila persistente ----
+async function createJob(job) {
+  const key = `${job.tenantId || 'default'}::${job.idempotencyKey}`;
+  if (state.jobs.has(key)) return { rowCount: 0 };
+  state.jobs.set(key, {
+    id: job.id,
+    tenant_id: job.tenantId || 'default',
+    instance_id: job.instanceId || 'default',
+    kind: job.kind,
+    payload: job.payload || {},
+    idempotency_key: job.idempotencyKey,
+    status: 'pending',
+    attempts: 0,
+    max_attempts: job.maxAttempts || 3,
+    run_at: job.runAt || new Date().toISOString(),
+    created_at: new Date().toISOString()
+  });
+  return { rowCount: 1 };
+}
+async function claimJobs({ kinds, limit = 10, workerId } = {}) {
+  const now = new Date().toISOString();
+  const claimed = [];
+  for (const job of state.jobs.values()) {
+    if (claimed.length >= limit) break;
+    if (job.status !== 'pending' || Date.parse(job.run_at) > Date.now()) continue;
+    if (kinds && kinds.length && !kinds.includes(job.kind)) continue;
+    job.status = 'processing';
+    job.locked_at = now;
+    job.locked_by = workerId || 'worker';
+    job.attempts += 1;
+    claimed.push({ ...job });
+  }
+  return claimed;
+}
+async function finishJob(id) {
+  for (const job of state.jobs.values()) {
+    if (job.id === id) {
+      job.status = 'done';
+      job.finished_at = new Date().toISOString();
+      return job;
+    }
+  }
+}
+async function failJob(id, error) {
+  for (const job of state.jobs.values()) {
+    if (job.id !== id) continue;
+    job.last_error = String(error?.message || error);
+    job.status = job.attempts >= job.max_attempts ? 'failed' : 'pending';
+    job.run_at = new Date().toISOString();
+    job.locked_at = null;
+    job.locked_by = null;
+    return job;
+  }
+}
+async function listJobs(tenantId = 'default', limit = 50) {
+  return [...state.jobs.values()]
+    .filter(job => job.tenant_id === tenant(tenantId))
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    .slice(0, limit)
+    .map(job => ({ ...job }));
 }
 
 module.exports = {
   mode,
   init,
+  scopedKey,
   getCameras,
   upsertCamera,
   updateCamera,
@@ -250,5 +438,20 @@ module.exports = {
   renderTemplate,
   getBotConfig,
   setBotConfig,
-  getReports
+  getReports,
+  listUsers,
+  createUser,
+  getUserById,
+  getUserByEmail,
+  createSessionToken,
+  getSessionByToken,
+  deleteSessionToken,
+  listInstances,
+  upsertInstance,
+  deleteInstance,
+  createJob,
+  claimJobs,
+  finishJob,
+  failJob,
+  listJobs
 };

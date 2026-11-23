@@ -1,20 +1,33 @@
 const { Pool } = require('pg');
 const { getConfig } = require('./db-config');
 const { normalizarNumeroWhatsapp } = require('./phone-utils');
+const { log } = require('./logger');
 
 const config = getConfig();
-
 const pool = new Pool({
   ...config,
-  // Cada instancia serverless deve manter no maximo uma conexao com o banco.
   max: process.env.VERCEL ? 1 : 10,
-  // Evita que uma conexao inalcancavel consuma todo o tempo limite da funcao.
   connectionTimeoutMillis: 5000,
-  idleTimeoutMillis: 10000,
+  idleTimeoutMillis: 10000
 });
+pool.on('error', error => log('error', 'db.idle_error', { error }));
 
-// Uma conexao ociosa pode ser encerrada pelo servidor; sem listener o Node crasha com ECONNRESET.
-pool.on('error', error => console.error('[DB] Erro em conexao ociosa:', error.message));
+const DATA_TABLES = [
+  'cameras', 'log', 'conversations', 'messages', 'consent',
+  'blocklist', 'message_templates', 'bot_config', 'app_migrations'
+];
+
+function tenant(value) {
+  return String(value || 'default');
+}
+
+// Identificadores de tenants nao-default sao prefixados internamente.
+// O tenant 'default' mantem as chaves antigas intactas.
+function scopedKey(value, tenantId) {
+  if (value === null || value === undefined) return value;
+  const t = tenant(tenantId);
+  return t === 'default' ? String(value) : `${t}::${String(value)}`;
+}
 
 async function init() {
   if (!config.password) {
@@ -22,268 +35,472 @@ async function init() {
   }
   await pool.query(`
     CREATE TABLE IF NOT EXISTS cameras (
-      id TEXT PRIMARY KEY,
-      camera_nome TEXT,
-      local TEXT,
-      responsavel_nome TEXT,
-      responsavel_telefone TEXT,
-      email TEXT,
-      status TEXT DEFAULT 'Pendente',
-      tentativas INTEGER DEFAULT 0,
-      ultima_cobranca TEXT,
-      data_resolucao TEXT,
-      observacoes TEXT
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default', instance_id TEXT NOT NULL DEFAULT 'default',
+      camera_nome TEXT, local TEXT, responsavel_nome TEXT, responsavel_telefone TEXT, email TEXT,
+      status TEXT DEFAULT 'Pendente', tentativas INTEGER DEFAULT 0,
+      ultima_cobranca TEXT, data_resolucao TEXT, observacoes TEXT
     );
     CREATE TABLE IF NOT EXISTS log (
-      id SERIAL PRIMARY KEY,
-      timestamp TEXT,
-      camera_id TEXT,
-      camera_nome TEXT,
-      responsavel_telefone TEXT,
-      acao TEXT,
-      detalhe TEXT,
-      status_anterior TEXT,
-      status_novo TEXT
+      id SERIAL PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default', instance_id TEXT NOT NULL DEFAULT 'default',
+      timestamp TEXT, camera_id TEXT, camera_nome TEXT, responsavel_telefone TEXT,
+      acao TEXT, detalhe TEXT, status_anterior TEXT, status_novo TEXT, trace_id TEXT
     );
     CREATE TABLE IF NOT EXISTS conversations (
-      jid TEXT PRIMARY KEY,
-      name TEXT,
-      last_message TEXT,
-      last_time TEXT,
-      unread INTEGER DEFAULT 0
+      jid TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default', instance_id TEXT NOT NULL DEFAULT 'default',
+      name TEXT, last_message TEXT, last_time TEXT, unread INTEGER DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default', instance_id TEXT NOT NULL DEFAULT 'default',
       jid TEXT REFERENCES conversations(jid) ON DELETE CASCADE,
-      direction TEXT,
-      text TEXT,
-      time TEXT
+      direction TEXT, text TEXT, time TEXT, status TEXT DEFAULT 'pending'
     );
     CREATE TABLE IF NOT EXISTS consent (
-      phone TEXT PRIMARY KEY,
-      opted_in INTEGER DEFAULT 0,
-      updated_at TEXT
+      phone TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
+      opted_in INTEGER DEFAULT 0, updated_at TEXT
     );
     CREATE TABLE IF NOT EXISTS blocklist (
-      phone TEXT PRIMARY KEY,
-      reason TEXT,
-      created_at TEXT
+      phone TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
+      reason TEXT, created_at TEXT
     );
     CREATE TABLE IF NOT EXISTS message_templates (
-      id TEXT PRIMARY KEY,
-      nome TEXT,
-      corpo TEXT,
-      variaveis TEXT,
-      created_at TEXT,
-      updated_at TEXT
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
+      nome TEXT, corpo TEXT, variaveis TEXT, created_at TEXT, updated_at TEXT
     );
     CREATE TABLE IF NOT EXISTS bot_config (
-      key TEXT PRIMARY KEY,
-      value TEXT,
-      updated_at TEXT
+      key TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
+      value TEXT, updated_at TEXT
     );
     CREATE TABLE IF NOT EXISTS app_migrations (
-      name TEXT PRIMARY KEY,
-      applied_at TEXT
+      name TEXT PRIMARY KEY, applied_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
+      email TEXT NOT NULL UNIQUE, name TEXT, password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'admin', created_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS user_sessions (
+      token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT, expires_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS whatsapp_instances (
+      tenant_id TEXT NOT NULL, instance_id TEXT NOT NULL,
+      label TEXT, auto_connect INTEGER NOT NULL DEFAULT 0, created_at TEXT,
+      PRIMARY KEY (tenant_id, instance_id)
+    );
+    CREATE TABLE IF NOT EXISTS jobs (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
+      instance_id TEXT NOT NULL DEFAULT 'default', kind TEXT NOT NULL,
+      payload TEXT NOT NULL DEFAULT '{}', idempotency_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 3, run_at TEXT NOT NULL,
+      locked_at TEXT, locked_by TEXT, last_error TEXT,
+      created_at TEXT, finished_at TEXT,
+      UNIQUE (tenant_id, idempotency_key)
     );
   `);
-  // seed default template
-  const tpl = await pool.query("SELECT id FROM message_templates WHERE id='cobranca_padrao'");
+
+  for (const table of DATA_TABLES) {
+    await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'`);
+  }
+  for (const table of ['cameras', 'log', 'conversations', 'messages']) {
+    await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS instance_id TEXT NOT NULL DEFAULT 'default'`);
+  }
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_cameras_tenant ON cameras(tenant_id, status)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_log_tenant_action ON log(tenant_id, acao, timestamp)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_tenant_time ON messages(tenant_id, time)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(status, run_at)');
+
+  const tpl = await pool.query("SELECT id FROM message_templates WHERE id='cobranca_padrao' AND tenant_id='default'");
   if (tpl.rows.length === 0) {
-    await pool.query(`INSERT INTO message_templates (id,nome,corpo,variaveis,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6)`,
-      ['cobranca_padrao', 'Cobrança de câmeras offline', 'Olá, {nome_cliente}!\nO Sentry identificou que estas câmeras estão offline:\n{lista_cameras}\n\nO que você prefere fazer?\n1. Estou analisando\n2. Preciso falar com técnico\n3. Já resolvi', 'nome_cliente,lista_cameras', new Date().toISOString(), new Date().toISOString()]);
+    await pool.query(
+      `INSERT INTO message_templates (id,tenant_id,nome,corpo,variaveis,created_at,updated_at) VALUES ($1,'default',$2,$3,$4,$5,$6)`,
+      ['cobranca_padrao', 'Cobrança de câmeras offline',
+        'Olá, {nome_cliente}!\nO Sentry identificou que estas câmeras estão offline:\n{lista_cameras}\n\nO que você prefere fazer?\n1. Estou analisando\n2. Preciso falar com técnico\n3. Já resolvi',
+        'nome_cliente,lista_cameras', new Date().toISOString(), new Date().toISOString()]
+    );
   }
-  // seed default bot config
-  const cfg = await pool.query("SELECT key FROM bot_config WHERE key='billing_days_before'");
+
+  const cfg = await pool.query("SELECT key FROM bot_config WHERE key='billing_days_before' AND tenant_id='default'");
   if (cfg.rows.length === 0) {
-    const defaults = { billing_days_before: '3', billing_days_after: '1,3,7', billing_hour: '9', maintenance_hour: '17', auto_mode: 'true', max_attempts: '3', business_hours_start: '8', business_hours_end: '18' };
-    for (const [k,v] of Object.entries(defaults)) await pool.query('INSERT INTO bot_config (key,value,updated_at) VALUES ($1,$2,$3)', [k, v, new Date().toISOString()]);
+    const defaults = {
+      billing_days_before: '3', billing_days_after: '1,3,7', billing_hour: '9',
+      maintenance_hour: '17', auto_mode: 'true', max_attempts: '3',
+      business_hours_start: '8', business_hours_end: '18'
+    };
+    for (const [key, value] of Object.entries(defaults)) {
+      await pool.query('INSERT INTO bot_config (key,tenant_id,value,updated_at) VALUES ($1,\'default\',$2,$3)', [key, value, new Date().toISOString()]);
+    }
   }
+
   const migration = await pool.query("SELECT name FROM app_migrations WHERE name='maintenance-hour-default'");
   if (migration.rows.length === 0) {
-    await pool.query("UPDATE bot_config SET value='17',updated_at=$1 WHERE key='maintenance_hour' AND value='18'", [new Date().toISOString()]);
+    await pool.query("UPDATE bot_config SET value='17',updated_at=$1 WHERE key='maintenance_hour' AND tenant_id='default' AND value='18'", [new Date().toISOString()]);
     await pool.query("INSERT INTO app_migrations (name,applied_at) VALUES ('maintenance-hour-default',$1)", [new Date().toISOString()]);
   }
+
   const consentMigration = await pool.query("SELECT name FROM app_migrations WHERE name='registered-camera-consents'");
   if (consentMigration.rows.length === 0) {
-    const cameras = await pool.query('SELECT DISTINCT responsavel_telefone FROM cameras WHERE responsavel_telefone IS NOT NULL');
+    const cameras = await pool.query('SELECT DISTINCT responsavel_telefone,tenant_id FROM cameras WHERE responsavel_telefone IS NOT NULL');
     for (const row of cameras.rows) {
       const phone = normalizarNumeroWhatsapp(row.responsavel_telefone);
-      if (phone) await ensureConsent(phone);
+      if (phone) await ensureConsent(phone, row.tenant_id);
     }
     await pool.query("INSERT INTO app_migrations (name,applied_at) VALUES ('registered-camera-consents',$1) ON CONFLICT (name) DO NOTHING", [new Date().toISOString()]);
   }
-  console.log('[DB] Schema pronto');
+  log('info', 'db.schema_ready');
 }
 
-async function getCameras() {
-  const r = await pool.query('SELECT * FROM cameras ORDER BY id');
+async function getCameras(tenantId = 'default') {
+  const r = await pool.query('SELECT * FROM cameras WHERE tenant_id=$1 ORDER BY id', [tenant(tenantId)]);
   return r.rows;
 }
-async function upsertCamera(cam) {
-  const existing = await pool.query('SELECT id FROM cameras WHERE id=$1', [cam.id]);
+async function upsertCamera(cam, tenantId = 'default') {
+  const t = tenant(tenantId);
+  const id = scopedKey(cam.id, t);
+  const existing = await pool.query('SELECT id FROM cameras WHERE id=$1 AND tenant_id=$2', [id, t]);
+  const values = [cam.camera_nome, cam.local, cam.responsavel_nome, cam.responsavel_telefone,
+    cam.email, cam.status, cam.tentativas, cam.ultima_cobranca, cam.data_resolucao, cam.observacoes];
   if (existing.rows.length > 0) {
-    await pool.query(`UPDATE cameras SET camera_nome=$1,local=$2,responsavel_nome=$3,responsavel_telefone=$4,email=$5,status=$6,tentativas=$7,ultima_cobranca=$8,data_resolucao=$9,observacoes=$10 WHERE id=$11`,
-      [cam.camera_nome,cam.local,cam.responsavel_nome,cam.responsavel_telefone,cam.email,cam.status,cam.tentativas,cam.ultima_cobranca,cam.data_resolucao,cam.observacoes,cam.id]);
+    await pool.query(`UPDATE cameras SET camera_nome=$1,local=$2,responsavel_nome=$3,responsavel_telefone=$4,email=$5,status=$6,tentativas=$7,ultima_cobranca=$8,data_resolucao=$9,observacoes=$10 WHERE id=$11 AND tenant_id=$12`,
+      [...values, id, t]);
   } else {
-    await pool.query(`INSERT INTO cameras (id,camera_nome,local,responsavel_nome,responsavel_telefone,email,status,tentativas,ultima_cobranca,data_resolucao,observacoes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [cam.id,cam.camera_nome,cam.local,cam.responsavel_nome,cam.responsavel_telefone,cam.email,cam.status,cam.tentativas,cam.ultima_cobranca,cam.data_resolucao,cam.observacoes]);
+    await pool.query(`INSERT INTO cameras (id,tenant_id,camera_nome,local,responsavel_nome,responsavel_telefone,email,status,tentativas,ultima_cobranca,data_resolucao,observacoes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [id, t, ...values]);
   }
 }
-async function updateCamera(id, fields) {
+async function updateCamera(id, fields, tenantId = 'default') {
   const allowed = new Set(['camera_nome','local','responsavel_nome','responsavel_telefone','email','status','tentativas','ultima_cobranca','data_resolucao','observacoes']);
   const sets = []; const vals = []; let i = 1;
-  for (const [k,v] of Object.entries(fields)) {
-    if (!allowed.has(k)) continue;
-    sets.push(`${k}=$${i++}`);
-    vals.push(v);
+  for (const [key, value] of Object.entries(fields || {})) {
+    if (!allowed.has(key)) continue;
+    sets.push(`${key}=$${i++}`);
+    vals.push(value);
   }
   if (sets.length === 0) return;
-  vals.push(id);
-  await pool.query(`UPDATE cameras SET ${sets.join(',')} WHERE id=$${i}`, vals);
+  vals.push(scopedKey(id, tenantId), tenant(tenantId));
+  await pool.query(`UPDATE cameras SET ${sets.join(',')} WHERE id=$${i} AND tenant_id=$${i + 1}`, vals);
 }
-async function deleteCamera(id) {
-  await pool.query('DELETE FROM cameras WHERE id=$1', [id]);
+async function deleteCamera(id, tenantId = 'default') {
+  await pool.query('DELETE FROM cameras WHERE id=$1 AND tenant_id=$2', [scopedKey(id, tenantId), tenant(tenantId)]);
 }
-async function addLog(entry) {
-  await pool.query(`INSERT INTO log (timestamp,camera_id,camera_nome,responsavel_telefone,acao,detalhe,status_anterior,status_novo) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [entry.timestamp, entry.camera_id, entry.camera_nome, entry.responsavel_telefone, entry.acao, entry.detalhe, entry.status_anterior, entry.status_novo]);
+async function addLog(entry, tenantId = 'default') {
+  await pool.query(
+    `INSERT INTO log (tenant_id,instance_id,timestamp,camera_id,camera_nome,responsavel_telefone,acao,detalhe,status_anterior,status_novo,trace_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [tenant(tenantId), entry.instance_id || 'default', entry.timestamp, entry.camera_id, entry.camera_nome,
+      entry.responsavel_telefone, entry.acao, entry.detalhe, entry.status_anterior, entry.status_novo, entry.trace_id || null]
+  );
 }
-async function getLog() {
-  const r = await pool.query('SELECT * FROM log ORDER BY id DESC LIMIT 200');
+async function getLog(tenantId = 'default') {
+  const r = await pool.query('SELECT * FROM log WHERE tenant_id=$1 ORDER BY id DESC LIMIT 500', [tenant(tenantId)]);
   return r.rows;
 }
-async function hasRecentLog(phone, actions, since) {
+async function hasRecentLog(phone, actions, since, tenantId = 'default') {
   const result = await pool.query(
     `SELECT 1 FROM log
-     WHERE responsavel_telefone=$1
-       AND acao=ANY($2::text[])
-       AND timestamp ~ '^\\d{4}-\\d{2}-\\d{2}T'
-       AND timestamp::timestamptz >= $3::timestamptz
-     LIMIT 1`,
-    [phone, actions, since]
+      WHERE tenant_id=$1 AND responsavel_telefone=$2
+        AND acao=ANY($3::text[])
+        AND timestamp ~ '^\\d{4}-\\d{2}-\\d{2}T'
+        AND timestamp::timestamptz >= $4::timestamptz
+      LIMIT 1`,
+    [tenant(tenantId), phone, actions, since]
   );
   return result.rowCount > 0;
 }
-async function getConversations() {
-  const r = await pool.query('SELECT * FROM conversations ORDER BY last_time DESC');
-  return r.rows.map(c => ({ jid: c.jid, name: c.name, lastMessage: c.last_message, lastTime: c.last_time, unread: c.unread }));
+async function getConversations(tenantId = 'default') {
+  const r = await pool.query('SELECT * FROM conversations WHERE tenant_id=$1 ORDER BY last_time DESC', [tenant(tenantId)]);
+  return r.rows.map(c => ({ jid: c.jid, name: c.name, lastMessage: c.last_message, lastTime: c.last_time, unread: c.unread, instanceId: c.instance_id }));
 }
-async function upsertConversation(jid, name, lastMessage, lastTime) {
-  await pool.query(`INSERT INTO conversations (jid,name,last_message,last_time,unread) VALUES ($1,$2,$3,$4,0) ON CONFLICT (jid) DO UPDATE SET name=$2,last_message=$3,last_time=$4`, [jid,name,lastMessage,lastTime]);
+async function upsertConversation(jid, name, lastMessage, lastTime, tenantId = 'default', instanceId = 'default') {
+  const t = tenant(tenantId);
+  const iid = scopedKey(jid, t);
+  await pool.query(
+    `INSERT INTO conversations (jid,tenant_id,instance_id,name,last_message,last_time,unread) VALUES ($1,$2,$3,$4,$5,$6,0)
+     ON CONFLICT (jid) DO UPDATE SET name=$4,last_message=$5,last_time=$6`,
+    [iid, t, String(instanceId || 'default'), name, lastMessage, lastTime]
+  );
 }
-async function incrementUnread(jid) {
-  await pool.query('UPDATE conversations SET unread = unread + 1 WHERE jid=$1', [jid]);
+async function incrementUnread(jid, tenantId = 'default', instanceId = 'default') {
+  await pool.query(
+    'UPDATE conversations SET unread = unread + 1 WHERE jid=$1 AND tenant_id=$2 AND instance_id=$3',
+    [scopedKey(jid, tenantId), tenant(tenantId), String(instanceId || 'default')]
+  );
 }
-async function getMessages(jid) {
-  const r = await pool.query('SELECT * FROM messages WHERE jid=$1 ORDER BY time', [jid]);
-  return r.rows.map(m => ({ id: m.id, from: m.jid, text: m.text, time: m.time, direction: m.direction }));
+async function getMessages(jid, tenantId = 'default') {
+  const r = await pool.query('SELECT * FROM messages WHERE jid=$1 AND tenant_id=$2 ORDER BY time', [scopedKey(jid, tenantId), tenant(tenantId)]);
+  return r.rows.map(m => ({ id: m.id, from: m.jid, text: m.text, time: m.time, direction: m.direction, status: m.status }));
 }
-async function addMessage(jid, msg) {
-  const result = await pool.query('INSERT INTO messages (id,jid,direction,text,time) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING RETURNING id', [msg.id, jid, msg.direction, msg.text, msg.time]);
+async function addMessage(jid, msg, tenantId = 'default', instanceId = 'default') {
+  const t = tenant(tenantId);
+  const result = await pool.query(
+    `INSERT INTO messages (id,tenant_id,instance_id,jid,direction,text,time,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (id) DO NOTHING RETURNING id`,
+    [scopedKey(msg.id, t), t, String(instanceId || 'default'), scopedKey(jid, t),
+      msg.direction, msg.text, msg.time, msg.status || 'received']
+  );
   return result.rowCount > 0;
 }
-async function markRead(jid) {
-  await pool.query('UPDATE conversations SET unread=0 WHERE jid=$1', [jid]);
+async function markRead(jid, tenantId = 'default') {
+  await pool.query('UPDATE conversations SET unread=0 WHERE jid=$1 AND tenant_id=$2', [scopedKey(jid, tenantId), tenant(tenantId)]);
 }
-async function isBlocked(phone) {
-  const r = await pool.query('SELECT phone FROM blocklist WHERE phone=$1', [phone]);
+async function isBlocked(phone, tenantId = 'default') {
+  const r = await pool.query('SELECT phone FROM blocklist WHERE phone=$1 AND tenant_id=$2', [scopedKey(phone, tenantId), tenant(tenantId)]);
   return r.rows.length > 0;
 }
-async function hasConsent(phone) {
-  const r = await pool.query('SELECT opted_in FROM consent WHERE phone=$1', [phone]);
+async function hasConsent(phone, tenantId = 'default') {
+  const r = await pool.query('SELECT opted_in FROM consent WHERE phone=$1 AND tenant_id=$2', [scopedKey(phone, tenantId), tenant(tenantId)]);
   return r.rows.length > 0 && Number(r.rows[0].opted_in) === 1;
 }
-async function getConsents() {
-  const r = await pool.query('SELECT phone,opted_in,updated_at FROM consent ORDER BY phone');
+async function getConsents(tenantId = 'default') {
+  const r = await pool.query('SELECT phone,opted_in,updated_at FROM consent WHERE tenant_id=$1 ORDER BY phone', [tenant(tenantId)]);
   return r.rows.map(row => ({ phone: row.phone, opted_in: Number(row.opted_in) === 1, updated_at: row.updated_at }));
 }
-async function setConsent(phone, optedIn) {
+async function setConsent(phone, optedIn, tenantId = 'default') {
   if (typeof optedIn !== 'boolean') throw new TypeError('optedIn deve ser booleano');
-  await pool.query(`INSERT INTO consent (phone,opted_in,updated_at) VALUES ($1,$2,$3) ON CONFLICT (phone) DO UPDATE SET opted_in=$2,updated_at=$3`, [phone, optedIn?1:0, new Date().toISOString()]);
+  const t = tenant(tenantId);
+  await pool.query(
+    `INSERT INTO consent (phone,tenant_id,opted_in,updated_at) VALUES ($1,$2,$3,$4)
+     ON CONFLICT (phone) DO UPDATE SET opted_in=$3,updated_at=$4`,
+    [scopedKey(phone, t), t, optedIn ? 1 : 0, new Date().toISOString()]
+  );
 }
-async function ensureConsent(phone) {
+async function ensureConsent(phone, tenantId = 'default') {
+  const t = tenant(tenantId);
+  const key = scopedKey(phone, t);
   const result = await pool.query(
-    `INSERT INTO consent (phone,opted_in,updated_at)
-     SELECT $1,1,$2
-     WHERE NOT EXISTS (SELECT 1 FROM consent WHERE phone=$1)
-       AND NOT EXISTS (SELECT 1 FROM blocklist WHERE phone=$1)
+    `INSERT INTO consent (phone,tenant_id,opted_in,updated_at)
+     SELECT $1,$2,1,$3
+     WHERE NOT EXISTS (SELECT 1 FROM consent WHERE phone=$1 AND tenant_id=$2)
+       AND NOT EXISTS (SELECT 1 FROM blocklist WHERE phone=$1 AND tenant_id=$2)
      ON CONFLICT (phone) DO NOTHING`,
-    [phone, new Date().toISOString()]
+    [key, t, new Date().toISOString()]
   );
   return result.rowCount > 0;
 }
-async function block(phone, reason) {
-  await pool.query(`INSERT INTO blocklist (phone,reason,created_at) VALUES ($1,$2,$3) ON CONFLICT (phone) DO NOTHING`, [phone, reason||'', new Date().toISOString()]);
+async function block(phone, reason, tenantId = 'default') {
+  const t = tenant(tenantId);
+  await pool.query(
+    `INSERT INTO blocklist (phone,tenant_id,reason,created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (phone) DO NOTHING`,
+    [scopedKey(phone, t), t, reason || '', new Date().toISOString()]
+  );
 }
-async function unblock(phone) {
-  await pool.query('DELETE FROM blocklist WHERE phone=$1', [phone]);
+async function unblock(phone, tenantId = 'default') {
+  await pool.query('DELETE FROM blocklist WHERE phone=$1 AND tenant_id=$2', [scopedKey(phone, tenantId), tenant(tenantId)]);
 }
-async function getBlocklist() {
-  const r = await pool.query('SELECT * FROM blocklist ORDER BY created_at DESC');
+async function getBlocklist(tenantId = 'default') {
+  const r = await pool.query('SELECT * FROM blocklist WHERE tenant_id=$1 ORDER BY created_at DESC', [tenant(tenantId)]);
   return r.rows;
 }
-async function getTemplates() {
-  const r = await pool.query('SELECT * FROM message_templates ORDER BY nome');
+async function getTemplates(tenantId = 'default') {
+  const r = await pool.query('SELECT * FROM message_templates WHERE tenant_id=$1 ORDER BY nome', [tenant(tenantId)]);
   return r.rows;
 }
-async function getTemplate(id) {
-  const r = await pool.query('SELECT * FROM message_templates WHERE id=$1', [id]);
+async function getTemplate(id, tenantId = 'default') {
+  const r = await pool.query('SELECT * FROM message_templates WHERE id=$1 AND tenant_id=$2', [scopedKey(id, tenantId), tenant(tenantId)]);
   return r.rows[0] || null;
 }
-async function upsertTemplate(tpl) {
+async function upsertTemplate(tpl, tenantId = 'default') {
+  const t = tenant(tenantId);
+  const id = scopedKey(tpl.id, t);
   const now = new Date().toISOString();
-  const existing = await pool.query('SELECT id FROM message_templates WHERE id=$1', [tpl.id]);
+  const existing = await pool.query('SELECT id FROM message_templates WHERE id=$1 AND tenant_id=$2', [id, t]);
   if (existing.rows.length > 0) {
-    await pool.query('UPDATE message_templates SET nome=$1,corpo=$2,variaveis=$3,updated_at=$4 WHERE id=$5', [tpl.nome, tpl.corpo, tpl.variaveis || '', now, tpl.id]);
+    await pool.query('UPDATE message_templates SET nome=$1,corpo=$2,variaveis=$3,updated_at=$4 WHERE id=$5 AND tenant_id=$6',
+      [tpl.nome, tpl.corpo, tpl.variaveis || '', now, id, t]);
   } else {
-    await pool.query('INSERT INTO message_templates (id,nome,corpo,variaveis,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6)', [tpl.id, tpl.nome, tpl.corpo, tpl.variaveis || '', now, now]);
+    await pool.query(
+      'INSERT INTO message_templates (id,tenant_id,nome,corpo,variaveis,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+      [id, t, tpl.nome, tpl.corpo, tpl.variaveis || '', now, now]
+    );
   }
 }
-async function deleteTemplate(id) {
-  await pool.query('DELETE FROM message_templates WHERE id=$1', [id]);
+async function deleteTemplate(id, tenantId = 'default') {
+  await pool.query('DELETE FROM message_templates WHERE id=$1 AND tenant_id=$2', [scopedKey(id, tenantId), tenant(tenantId)]);
 }
 function renderTemplate(corpo, vars) {
   let out = corpo;
-  for (const [key, value] of Object.entries(vars || {})) {
-    out = out.split(`{${key}}`).join(String(value));
-  }
+  for (const [key, value] of Object.entries(vars || {})) out = out.split(`{${key}}`).join(String(value));
   return out;
 }
-async function getBotConfig() {
-  const r = await pool.query('SELECT * FROM bot_config');
+async function getBotConfig(tenantId = 'default') {
+  const t = tenant(tenantId);
+  const r = await pool.query('SELECT key,value FROM bot_config WHERE tenant_id=$1', [t]);
   const cfg = {};
-  for (const row of r.rows) cfg[row.key] = row.value;
+  for (const row of r.rows) {
+    const prefix = t === 'default' ? null : `${t}::`;
+    const key = prefix && String(row.key).startsWith(prefix) ? String(row.key).slice(prefix.length) : row.key;
+    cfg[key] = row.value;
+  }
   return cfg;
 }
-async function setBotConfig(key, value) {
-  const now = new Date().toISOString();
-  await pool.query(`INSERT INTO bot_config (key,value,updated_at) VALUES ($1,$2,$3) ON CONFLICT (key) DO UPDATE SET value=$2,updated_at=$3`, [key, value, now]);
+async function setBotConfig(key, value, tenantId = 'default') {
+  // A chave primaria de bot_config e global; prefixamos para nao colidir entre tenants.
+  await pool.query(
+    `INSERT INTO bot_config (key,tenant_id,value,updated_at) VALUES ($1,$2,$3,$4)
+     ON CONFLICT (key) DO UPDATE SET value=$3,updated_at=$4`,
+    [scopedKey(key, tenantId), tenant(tenantId), value, new Date().toISOString()]
+  );
 }
-async function getReports() {
-  const cameras = await pool.query('SELECT * FROM cameras');
-  const logs = await pool.query('SELECT * FROM log');
+async function getReports(tenantId = 'default') {
+  const t = tenant(tenantId);
+  const cameras = await pool.query('SELECT * FROM cameras WHERE tenant_id=$1', [t]);
+  const logs = await pool.query('SELECT * FROM log WHERE tenant_id=$1', [t]);
   const counts = { Pendente:0, 'Aguardando resposta':0, Verificando:0, Suporte:0, 'Aguardando validacao':0, Resolvido:0 };
-  for (const c of cameras.rows) { const st = String(c.status||'').trim(); if (counts[st] !== undefined) counts[st]++; }
-  const resolvidas = cameras.rows.filter(c => c.status === 'Resolvido' && c.data_resolucao);
-  let tempoMedio = null;
-  if (resolvidas.length > 0) {
-    const total = resolvidas.reduce((acc, c) => {
-      const inicio = new Date(c.ultima_cobranca || c.data_resolucao);
-      const fim = new Date(c.data_resolucao);
-      return acc + (fim - inicio);
-    }, 0);
-    tempoMedio = Math.round(total / resolvidas.length / 3600000);
+  for (const c of cameras.rows) {
+    const st = String(c.status || '').trim();
+    if (counts[st] !== undefined) counts[st] += 1;
   }
+  const resolvidas = cameras.rows.filter(c => c.status === 'Resolvido' && c.data_resolucao);
   const cobrancasEnviadas = logs.rows.filter(l => l.acao === 'COBRANCA_ENVIADA').length;
   const erros = logs.rows.filter(l => l.acao === 'ERRO').length;
-  const escalonamentos = logs.rows.filter(l => l.acao === 'ESCALONAMENTO').length;
-  const today = new Date().toISOString().slice(0,10);
-  const msgsHoje = await pool.query("SELECT direction, COUNT(*) as c FROM messages WHERE time LIKE $1 GROUP BY direction", [today + '%']);
+  const escalonamentos = logs.rows.filter(l => l.acao === 'RESPOSTA_RECEBIDA' && l.status_novo === 'Suporte').length;
+  const today = new Date().toISOString().slice(0, 10);
+  const msgsHoje = await pool.query('SELECT direction, COUNT(*) as c FROM messages WHERE tenant_id=$1 AND time LIKE $2 GROUP BY direction', [t, `${today}%`]);
   let enviadasHoje = 0, recebidasHoje = 0;
-  for (const r of msgsHoje.rows) { if (r.direction === 'out') enviadasHoje = Number(r.c); else recebidasHoje = Number(r.c); }
-  const clientesAguardando = await pool.query("SELECT COUNT(*) as c FROM conversations WHERE unread > 0");
-  return { counts, total: cameras.rows.length, tempoMedioHoras: tempoMedio, cobrancasEnviadas, erros, escalonamentos, resolvidas: resolvidas.length, enviadasHoje, recebidasHoje, clientesAguardando: Number(clientesAguardando.rows[0].c) };
+  for (const r of msgsHoje.rows) {
+    if (r.direction === 'out') enviadasHoje = Number(r.c);
+    else recebidasHoje = Number(r.c);
+  }
+  const clientesAguardando = await pool.query('SELECT COUNT(*) as c FROM conversations WHERE tenant_id=$1 AND unread > 0', [t]);
+  return {
+    counts,
+    total: cameras.rows.length,
+    tempoMedioHoras: null,
+    cobrancasEnviadas,
+    erros,
+    escalonamentos,
+    resolvidas: resolvidas.length,
+    enviadasHoje,
+    recebidasHoje,
+    clientesAguardando: Number(clientesAguardando.rows[0].c)
+  };
 }
 
-module.exports = { pool, init, getCameras, upsertCamera, updateCamera, deleteCamera, addLog, getLog, hasRecentLog, getConversations, upsertConversation, incrementUnread, getMessages, addMessage, markRead, isBlocked, hasConsent, getConsents, setConsent, ensureConsent, block, unblock, getBlocklist, getTemplates, getTemplate, upsertTemplate, deleteTemplate, renderTemplate, getBotConfig, setBotConfig, getReports };
+// ---- Autenticacao ----
+async function listUsers() {
+  const r = await pool.query('SELECT id,tenant_id,email,name,role,created_at FROM users ORDER BY email');
+  return r.rows;
+}
+async function createUser(user) {
+  await pool.query(
+    'INSERT INTO users (id,tenant_id,email,name,password_hash,role,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+    [user.id, tenant(user.tenantId), user.email, user.name || '', user.password_hash, user.role || 'admin', new Date().toISOString()]
+  );
+  return getUserById(user.id);
+}
+async function getUserById(id) {
+  const r = await pool.query('SELECT * FROM users WHERE id=$1', [id]);
+  return r.rows[0] || null;
+}
+async function getUserByEmail(email) {
+  const r = await pool.query('SELECT * FROM users WHERE email=$1', [String(email || '').toLowerCase()]);
+  return r.rows[0] || null;
+}
+async function createSessionToken(userId, tokenHash, expiresAt) {
+  await pool.query('INSERT INTO user_sessions (token_hash,user_id,created_at,expires_at) VALUES ($1,$2,$3,$4)',
+    [tokenHash, userId, new Date().toISOString(), expiresAt]);
+}
+async function getSessionByToken(tokenHash) {
+  const r = await pool.query(
+    `SELECT u.* FROM user_sessions s JOIN users u ON u.id=s.user_id
+     WHERE s.token_hash=$1 AND s.expires_at > $2`,
+    [tokenHash, new Date().toISOString()]
+  );
+  return r.rows[0] || null;
+}
+async function deleteSessionToken(tokenHash) {
+  await pool.query('DELETE FROM user_sessions WHERE token_hash=$1', [tokenHash]);
+}
+
+// ---- Instancias WhatsApp ----
+async function listInstances() {
+  const r = await pool.query('SELECT * FROM whatsapp_instances ORDER BY tenant_id,instance_id');
+  return r.rows;
+}
+async function upsertInstance(instance) {
+  await pool.query(
+    `INSERT INTO whatsapp_instances (tenant_id,instance_id,label,auto_connect,created_at) VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (tenant_id,instance_id) DO UPDATE SET label=$3,auto_connect=$4`,
+    [tenant(instance.tenantId), String(instance.instanceId), instance.label || '', instance.autoConnect ? 1 : 0, new Date().toISOString()]
+  );
+}
+async function deleteInstance(tenantId, instanceId) {
+  await pool.query('DELETE FROM whatsapp_instances WHERE tenant_id=$1 AND instance_id=$2', [tenant(tenantId), String(instanceId)]);
+}
+
+// ---- Fila persistente ----
+function createJob(job) {
+  return pool.query(
+    `INSERT INTO jobs (id,tenant_id,instance_id,kind,payload,idempotency_key,status,attempts,max_attempts,run_at,created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'pending',0,$7,$8,$9)
+     ON CONFLICT (tenant_id,idempotency_key) DO NOTHING RETURNING id`,
+    [job.id, tenant(job.tenantId), String(job.instanceId || 'default'), job.kind,
+      JSON.stringify(job.payload || {}), String(job.idempotencyKey), Number(job.maxAttempts || 3),
+      job.runAt || new Date().toISOString(), new Date().toISOString()]
+  );
+}
+async function claimJobs({ kinds, limit = 10, workerId } = {}) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const now = new Date().toISOString();
+    const worker = workerId || 'worker';
+    // Cada query recebe apenas os parametros que realmente usa: o Postgres
+    // nao infere tipo de parametro que nao aparece na propria query.
+    const selectParams = [now];
+    let where = 'status=\'pending\' AND run_at <= $1 AND (locked_at IS NULL OR locked_at < $1)';
+    if (kinds && kinds.length) {
+      selectParams.push(kinds);
+      where += ` AND kind=ANY($${selectParams.length}::text[])`;
+    }
+    selectParams.push(limit);
+    const limitIndex = selectParams.length;
+    const r = await client.query(
+      `SELECT * FROM jobs WHERE ${where} ORDER BY run_at,created_at LIMIT $${limitIndex} FOR UPDATE SKIP LOCKED`,
+      selectParams
+    );
+    if (r.rows.length) {
+      const ids = r.rows.map(row => row.id);
+      await client.query('UPDATE jobs SET status=\'processing\',locked_at=$1,locked_by=$2,attempts=attempts+1 WHERE id=ANY($3::text[])',
+        [now, worker, ids]);
+    }
+    await client.query('COMMIT');
+    return r.rows;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+async function finishJob(id, result = {}) {
+  await pool.query("UPDATE jobs SET status='done',finished_at=$1,last_error=NULL WHERE id=$2", [new Date().toISOString(), id]);
+  return result;
+}
+async function failJob(id, error) {
+  await pool.query(
+    `UPDATE jobs SET status=CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,
+      last_error=$1,locked_at=NULL,locked_by=NULL,run_at=NOW()::text,
+      finished_at=CASE WHEN attempts >= max_attempts THEN $2 ELSE NULL END
+     WHERE id=$3`,
+    [String(error?.message || error).slice(0, 1000), new Date().toISOString(), id]
+  );
+}
+async function listJobs(tenantId = 'default', limit = 50) {
+  const r = await pool.query('SELECT * FROM jobs WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2', [tenant(tenantId), limit]);
+  return r.rows;
+}
+
+module.exports = {
+  pool, init, scopedKey,
+  getCameras, upsertCamera, updateCamera, deleteCamera,
+  addLog, getLog, hasRecentLog,
+  getConversations, upsertConversation, incrementUnread, getMessages, addMessage, markRead,
+  isBlocked, hasConsent, getConsents, setConsent, ensureConsent, block, unblock, getBlocklist,
+  getTemplates, getTemplate, upsertTemplate, deleteTemplate, renderTemplate,
+  getBotConfig, setBotConfig, getReports,
+  listUsers, createUser, getUserById, getUserByEmail,
+  createSessionToken, getSessionByToken, deleteSessionToken,
+  listInstances, upsertInstance, deleteInstance,
+  createJob, claimJobs, finishJob, failJob, listJobs
+};

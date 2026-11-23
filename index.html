@@ -106,6 +106,7 @@ svg text{fill:var(--mut);font-size:11px;font-family:inherit}
  <div class="logo"><img src="logo-sentry.png" alt="Sentry" style="max-width:180px;height:auto;display:block"></div>
  <nav id="nav"></nav>
  <button class="themebtn" id="theme">Alternar tema</button>
+ <button class="themebtn" id="logout" style="display:none">Sair</button>
 </aside>
 <main>
  <div id="view"></div>
@@ -121,7 +122,9 @@ const TABS=[
  {k:"aguardando",t:"Falar com técnico",d:"Fila de atendimento. A conversa acontece aqui e segue pelo WhatsApp."},
  {k:"validacao",t:"Validar resolução",d:"O responsável informou que resolveu. Confirme se as câmeras voltaram antes de encerrar."},
  {k:"resolvido",t:"Resolvido",d:"Câmeras que voltaram a funcionar. Serve para acompanhar o histórico e o tempo de solução."},
- {k:"whatsapp",t:"Central WhatsApp",d:"Conexão por QR Code, status e conversas."},
+ {k:"whatsapp",t:"Central WhatsApp",d:"Conversas em tempo real das instâncias conectadas."},
+ {k:"instances",t:"Instâncias",d:"Conectar números por QR Code e administrar cada sessão separadamente."},
+ {k:"diag",t:"Diagnóstico",d:"Estado real de sessões, fila e armazenamento para investigar falhas."},
  {k:"templates",t:"Modelos",d:"Cadastrar, editar e testar modelos de mensagem com variáveis dinâmicas."},
  {k:"reports",t:"Relatórios",d:"Indicadores e métricas do sistema."},
  {k:"botconfig",t:"Config. Bots",d:"Configurar agendamentos, limites e modo de operação dos bots."},
@@ -131,15 +134,47 @@ const H=3600000,now=()=>Date.now();
 const sendsInProgress=new Set();
 let cams=[],phones={},tab="dash",fv={r:"",p:""},pend=[],storageMode="";
 let loadError="";
+let currentUser=null,authRequired=false,authError="";
+let instances=[],currentInstance="default",diagData=null;
 const DDDS_VALIDOS=new Set(['11','12','13','14','15','16','17','18','19','21','22','24','27','28','31','32','33','34','35','37','38','41','42','43','44','45','46','47','48','49','51','53','54','55','61','62','63','64','65','66','67','68','69','71','73','74','75','77','79','81','82','83','84','85','86','87','88','89','91','92','93','94','95','96','97','98','99']);
 function extrairDDD(entrada){let num=String(entrada).split('@')[0].replace(/\D/g,'').replace(/^0+/,'');if(num.startsWith('55')&&(num.length===12||num.length===13))num=num.slice(2);if(num.length!==10&&num.length!==11)return null;const ddd=num.slice(0,2);return DDDS_VALIDOS.has(ddd)?ddd:null}
 async function checkWaNumber(phone){const digits=String(phone||"").replace(/\D/g,"");if(!extrairDDD(digits))return {exists:false,error:"DDD invalido"};try{return await apiRequest("/api/whatsapp/check/"+encodeURIComponent(digits))}catch(e){return {exists:null,error:e.message}}}
 async function apiRequest(url,options={}){
- const response=await fetch(url,options);
+ const response=await fetch(url,{credentials:"same-origin",...options});
  let data={};
  try{data=await response.json()}catch(e){}
+ if(response.status===401 && url!=="/api/auth/login"){
+   authRequired=true;currentUser=null;draw();
+   throw new Error("Sessão expirada. Entre novamente.");
+ }
  if(!response.ok)throw new Error(data.erro||`Erro HTTP ${response.status}`);
  return data;
+}
+async function loadSession(){
+ try{
+  const data=await apiRequest("/api/auth/me");
+  currentUser=data.user||null;
+  authRequired=data.required!==false&&!currentUser;
+ }catch(e){authRequired=true;authError=e.message}
+ draw();
+}
+async function doLogin(){
+ const email=document.getElementById("login-email")?.value.trim();
+ const password=document.getElementById("login-password")?.value||"";
+ authError="";
+ try{
+  const data=await apiRequest("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password})});
+  currentUser=data.user;authRequired=false;authError="";
+  await afterLogin();
+ }catch(e){authError=e.message;draw()}
+}
+async function doLogout(){
+ try{await apiRequest("/api/auth/logout",{method:"POST"})}catch(e){}
+ currentUser=null;authRequired=true;instances=[];draw();
+}
+async function afterLogin(){
+ await Promise.allSettled([loadFromApi(),loadInstances(),loadConversations(),loadWaStatus(),loadDiag()]);
+ draw();
 }
 async function loadFromApi(){
   try{
@@ -159,7 +194,6 @@ async function loadFromApi(){
   }
   draw();
 }
-loadFromApi();
 const $=s=>document.querySelector(s);
 const groups=st=>{const g={};cams.filter(c=>c.status===st).forEach(c=>(g[c.resp]=g[c.resp]||[]).push(c));return g};
 const ago=ts=>{const h=Math.floor((now()-ts)/H);return h<1?"há menos de 1 h":h<48?`há ${h} h`:`há ${Math.floor(h/24)} dias`};
@@ -278,27 +312,104 @@ return `<div class="box"><h2>Cadastrar câmeras offline</h2>
 <div class="chips">${pend.length?pend.map(i=>`<span class="chip">${i}<button class="x" data-a="rmid" data-r="${q(i)}" aria-label="Remover ${i}">×</button></span>`).join(""):`<span class="sim">Adicione quantas câmeras precisar. Também dá para colar vários IDs de uma vez.</span>`}</div>
 <div class="act" style="margin-top:10px"><button class="btn p" data-a="cad">Cadastrar responsável e câmeras</button></div>
 <p class="sub" style="padding:10px 0 0">Se o responsável já existe, as câmeras entram no mesmo grupo.</p></div>`}
+function loginView(){
+ return `<div class="box" style="max-width:420px;margin:8vh auto">
+  <h1>Acesso ao painel</h1>
+  <p class="lead">Entre com a conta administradora criada no servidor.</p>
+  ${authError?`<p class="note">${esc(authError)}</p>`:""}
+  <label>E-mail</label><input id="login-email" type="email" autocomplete="username" placeholder="admin@empresa.com">
+  <label>Senha</label><input id="login-password" type="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+  <div class="act" style="margin-top:14px"><button class="btn p" onclick="doLogin()">Entrar</button></div>
+ </div>`;
+}
+async function loadInstances(){
+ try{
+  const data=await apiRequest("/api/instances");
+  instances=Array.isArray(data)?data:[];
+  if(!instances.some(i=>i.instanceId===currentInstance))currentInstance=instances[0]?.instanceId||"default";
+  if(tab==="instances"||tab==="diag")draw();
+ }catch(e){toast(`Falha ao carregar instâncias: ${e.message}`)}
+}
+function selectInstance(id){currentInstance=id;waActiveJid=null;waMessages=[];loadWaStatus();loadConversations();draw()}
+async function createInstance(){
+ const el=document.getElementById("inst-new-id");
+ const id=el?.value.trim()||"";
+ if(!/^[a-zA-Z0-9_-]{1,64}$/.test(id))return toast("Use até 64 caracteres: letras, números, _ ou -");
+ try{await apiRequest("/api/instances",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instanceId:id,label:id})});el.value="";toast("Instância criada");await loadInstances()}catch(e){toast(`Falha ao criar: ${e.message}`)}
+}
+async function instanceAction(action,id){
+ if(action==="delete"&&!confirm("Isso apaga a sessão pareada desta instância. Continuar?"))return;
+ const map={connect:"/connect",disconnect:"/disconnect",qr:"/qr",delete:""};
+ try{
+  await apiRequest("/api/instances/"+encodeURIComponent(id)+map[action],{method:action==="delete"?"DELETE":"POST"});
+  toast(action==="qr"?"Novo QR solicitado":action==="connect"?"Conectando...":action==="delete"?"Instância removida":"Desconectada");
+  await Promise.allSettled([loadInstances(),loadWaStatus()]);
+ }catch(e){toast(`Falha: ${e.message}`)}
+}
+async function loadDiag(){
+ try{
+  const [health,jobs]=await Promise.all([apiRequest("/api/health"),apiRequest("/api/jobs?limit=20")]);
+  diagData={health,jobs,instances};
+  if(tab==="diag")draw();
+ }catch(e){toast(`Falha ao carregar diagnóstico: ${e.message}`)}
+}
+function diagView(){
+ const d=diagData||{};
+ const jobs=Array.isArray(d.jobs)?d.jobs:[];
+ const rows=jobs.map(j=>`<div class="lg"><span>${esc(j.kind)}</span><span>${esc(j.status)}</span><span>${esc(j.tenant_id||"")}</span><span>${esc(j.last_error||"")}</span></div>`).join("")||`<div class="empty">Nenhuma tarefa na fila.</div>`;
+ const inst=instances.map(i=>`<div class="lg"><span>${esc(i.label||i.instanceId)}</span><span>${esc(i.status)}</span><span>${esc(i.phone||"—")}</span><span>${i.reconnectAttempts?esc(i.reconnectAttempts)+" tentativas":""}</span></div>`).join("")||`<div class="empty">Nenhuma instância.</div>`;
+ return `<h1>Diagnóstico</h1><p class="lead">${TABS.find(x=>x.k===tab).d}</p>
+ <div class="kpis"><div class="kpi"><b>${esc(d.health?.status||"—")}</b><span>API</span></div><div class="kpi"><b>${d.health?.cameras??"—"}</b><span>câmeras no banco</span></div><div class="kpi"><b>${esc(d.health?.storage||"postgres")}</b><span>armazenamento</span></div><div class="kpi"><b>${jobs.filter(j=>j.status==="failed").length}</b><span>tarefas falhadas</span></div></div>
+ <div class="box" style="margin-bottom:16px"><h2>Instâncias</h2>${inst}</div>
+ <div class="box"><h2>Fila persistente (últimas tarefas)</h2>${rows}</div>`;
+}
+function instancesView(){
+ const T=TABS.find(x=>x.k===tab);
+ const list=instances.map(i=>{
+  const active=i.instanceId===currentInstance;
+  const status=i.status||"disconnected";
+  const tag=status==="open"?'<span class="tag g">conectado</span>':status==="qr"?'<span class="tag a">aguardando QR</span>':status==="reconnecting"?'<span class="tag b">reconectando</span>':'<span class="tag r">desconectado</span>';
+  return `<div class="grp" style="border-left-color:${active?'var(--brand)':'var(--line)'}"><div class="gh"><b>${esc(i.label||i.instanceId)}</b>${tag}</div>
+  <div class="sub" style="padding:5px 0 0">${esc(i.instanceId)} · ${esc(i.phone||"sem número")}${i.error?` · ${esc(i.error)}`:""}</div>
+  <div class="act" style="margin-top:10px">
+   <button class="btn s" onclick="selectInstance('${q(i.instanceId)}')">Selecionar</button>
+   ${status==="open"?`<button class="btn s" onclick="instanceAction('disconnect','${q(i.instanceId)}')">Desconectar</button>`:`<button class="btn s p" onclick="instanceAction('connect','${q(i.instanceId)}')">Conectar</button><button class="btn s" onclick="instanceAction('qr','${q(i.instanceId)}')">Novo QR</button>`}
+   <button class="btn s" onclick="instanceAction('delete','${q(i.instanceId)}')">Excluir sessão</button>
+  </div>
+  ${active&&i.qr?`<p style="margin:12px 0 4px"><img src="${esc(i.qr)}" alt="QR Code" style="max-width:200px;border:1px solid var(--line);border-radius:8px"></p><p class="sub">Escaneie no WhatsApp → Dispositivos conectados → Conectar dispositivo.</p>`:""}
+  </div>`;
+ }).join("")||`<div class="empty">Nenhuma instância cadastrada.</div>`;
+ return `<h1>Instâncias WhatsApp</h1><p class="lead">${T.d}</p>
+ <div class="box" style="max-width:520px;margin-bottom:16px"><h2>Nova instância</h2>
+  <label>Identificador (ex: filial_2)</label><input id="inst-new-id" placeholder="filial_2">
+  <div class="act" style="margin-top:10px"><button class="btn p" onclick="createInstance()">Criar instância</button></div>
+ </div>
+ ${list}`;
+}
 let waState={status:"disconnected",qr:null,phone:null};
-async function loadWaStatus(){try{const s=await apiRequest("/api/whatsapp/status");if(JSON.stringify(s)!==JSON.stringify(waState)){waState=s;if(tab==="whatsapp")draw()}}catch(e){}}
+async function loadWaStatus(){try{const s=await apiRequest("/api/whatsapp/status?instanceId="+encodeURIComponent(currentInstance));if(JSON.stringify(s)!==JSON.stringify(waState)){waState=s;if(Array.isArray(s.instances))instances=s.instances;if(tab==="whatsapp"||tab==="instances")draw()}}catch(e){}}
 let waConversations=[];
 let waActiveJid=null;
 let waMessages=[];
 let waError="";
-async function loadConversations(q){try{waConversations=await apiRequest("/api/whatsapp/conversations"+(q?"?q="+encodeURIComponent(q):""));if(tab==="whatsapp")draw()}catch(e){waError=e.message;if(tab==="whatsapp")draw()}}
+async function loadConversations(q){try{const sep=(q?"?":"?");waConversations=await apiRequest("/api/whatsapp/conversations"+sep+"instanceId="+encodeURIComponent(currentInstance)+(q?"&q="+encodeURIComponent(q):""));if(tab==="whatsapp")draw()}catch(e){waError=e.message;if(tab==="whatsapp")draw()}}
 function waSearch(q){loadConversations(q)}
 async function loadMessages(jid){waActiveJid=jid;try{waMessages=await apiRequest("/api/whatsapp/messages/"+encodeURIComponent(jid));await apiRequest("/api/whatsapp/read/"+encodeURIComponent(jid),{method:"POST"});if(tab==="whatsapp")draw()}catch(e){waError=e.message;toast(`Falha ao carregar conversa: ${e.message}`)}}
-async function sendWaMsg(){const inp=document.getElementById("wa-input");const v=inp&&inp.value.trim();if(!v||!waActiveJid)return;try{await apiRequest("/api/whatsapp/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:waActiveJid,text:v})});inp.value="";await loadMessages(waActiveJid)}catch(e){toast(`Falha no envio: ${e.message}`)}}
+async function sendWaMsg(){const inp=document.getElementById("wa-input");const v=inp&&inp.value.trim();if(!v||!waActiveJid)return;try{await apiRequest("/api/whatsapp/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:waActiveJid,text:v,instanceId:currentInstance})});inp.value="";await loadMessages(waActiveJid)}catch(e){toast(`Falha no envio: ${e.message}`)}}
 let waSocket=null;
 try{
   if(typeof io==="function"){
     waSocket=io();
-    waSocket.on("wa:status",s=>{waState=s;draw()});
+    waSocket.on("wa:status",s=>{
+      if(Array.isArray(s)){instances=s;if(!s.some(i=>i.instanceId===currentInstance))currentInstance=s[0]?.instanceId||"default";loadWaStatus()}
+      else{waState=s;if(tab==="whatsapp"||tab==="instances")draw()}
+    });
     waSocket.on("wa:newMessage",async d=>{waError="";await loadConversations();if(waActiveJid===d.jid)await loadMessages(d.jid);if(tab!=="whatsapp")await loadFromApi()});
     waSocket.on("connect_error",()=>{});
   }
 }catch(e){console.warn("Socket.IO indisponivel:",e.message)}
-async function waConnect(){try{await apiRequest("/api/whatsapp/connect",{method:"POST"});waError="";toast("Conectando...")}catch(e){waError=e.message;toast(`Falha ao conectar: ${e.message}`)}await loadWaStatus();draw()}
-async function waDisconnect(){try{await apiRequest("/api/whatsapp/disconnect",{method:"POST"});waError="";toast("Desconectado")}catch(e){toast(`Falha ao desconectar: ${e.message}`)}await loadWaStatus();draw()}
+async function waConnect(){try{await apiRequest("/api/whatsapp/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instanceId:currentInstance})});waError="";toast("Conectando...")}catch(e){waError=e.message;toast(`Falha ao conectar: ${e.message}`)}await loadWaStatus();draw()}
+async function waDisconnect(){try{await apiRequest("/api/whatsapp/disconnect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instanceId:currentInstance})});waError="";toast("Desconectado")}catch(e){toast(`Falha ao desconectar: ${e.message}`)}await loadWaStatus();draw()}
 function waView(){
  const T=TABS.find(x=>x.k===tab);
  if(waState.status==="configured")return `<h1>Central WhatsApp</h1><div class="box" style="max-width:560px"><h2>API configurada</h2><p class="lead">O envio está configurado no servidor, mas este painel serverless não confirma conexão, entrega ou respostas, nem mantém conversas atualizadas.</p><p class="sub" style="padding:10px 0">Para conexão por QR, conversas em tempo real e bots locais, use o painel no computador ou servidor persistente onde o WhatsApp está conectado.</p></div>`;
@@ -326,12 +437,14 @@ function waView(){
   </div>
   <div>
    <div class="box" style="max-width:420px;margin-bottom:16px">
+     <label>Instância ativa</label>
+     <select id="wa-instance" onchange="selectInstance(this.value)">${instances.map(i=>`<option value="${q(i.instanceId)}" ${i.instanceId===currentInstance?"selected":""}>${esc(i.label||i.instanceId)}</option>`).join("")||`<option value="default">default</option>`}</select>
     <h2>Conexão por QR Code</h2>
     ${waError||waState.error?`<p class="note">${esc(waError||waState.error)}</p>`:""}
     ${waState.status==="open"
       ? `<p class="lead">Conectado: <b>${waState.phone}</b></p><button class="btn" onclick="waDisconnect()">Desconectar</button>`
       : waState.qr
-        ? `<p class="lead">Escaneie o QR Code com o WhatsApp:</p><img src="${waState.qr}" alt="QR Code" style="max-width:200px;border:1px solid var(--line);border-radius:8px"><p class="sub" style="padding:10px 0 0">Aguardando leitura...</p><button class="btn" onclick="waConnect()">Gerar novo QR</button>`
+        ? `<p class="lead">Escaneie o QR Code com o WhatsApp:</p><img src="${esc(waState.qr)}" alt="QR Code" style="max-width:200px;border:1px solid var(--line);border-radius:8px"><p class="sub" style="padding:10px 0 0">Aguardando leitura...</p><button class="btn" onclick="instanceAction('qr',currentInstance)">Gerar novo QR</button>`
         : `<p class="lead">Desconectado. Clique para gerar o QR Code:</p><button class="btn p" onclick="waConnect()">Conectar WhatsApp</button>`}
    </div>
    ${chat}
@@ -446,6 +559,9 @@ function blockView(){
  </div>`;
 }
 function view(){
+ if(authRequired)return loginView();
+ if(tab==="instances")return instancesView();
+ if(tab==="diag")return diagView();
  const T=TABS.find(x=>x.k===tab),g=groups(tab),ks=Object.keys(g);
  if(tab==="whatsapp")return waView();
  if(tab==="templates")return tplView();
@@ -474,14 +590,16 @@ function dash(){
 function pushIds(){const e=$("#f-id");if(!e)return;e.value.split(/[,;\s]+/).map(x=>x.trim().toUpperCase()).filter(Boolean).forEach(i=>{if(!pend.includes(i))pend.push(i)});e.value="";draw()}
 function focusId(){const e=$("#f-id");if(e)e.focus()}
 function draw(){
- const ICONS={dash:"📊",offline:"⚠️",notificado:"🔔",analisando:"🔍",aguardando:"🛠️",validacao:"☑️",resolvido:"✅",whatsapp:"💬",templates:"📝",reports:"📈",botconfig:"⚙️",blocklist:"🚫"};
+ if(authRequired){$("#nav").innerHTML="";$("#view").innerHTML=loginView();return}
+ const ICONS={dash:"📊",offline:"⚠️",notificado:"🔔",analisando:"🔍",aguardando:"🛠️",validacao:"☑️",resolvido:"✅",whatsapp:"💬",instances:"📱",diag:"🩺",templates:"📝",reports:"📈",botconfig:"⚙️",blocklist:"🚫"};
  $("#nav").innerHTML=TABS.map(t=>`<button data-k="${t.k}" class="${t.k===tab?"on":""}"><span>${ICONS[t.k]||""} ${t.t}</span>${t.k==="dash"?"":`<span class="n">${new Set(cams.filter(c=>c.status===t.k).map(c=>c.resp)).size}</span>`}</button>`).join("");
  const keep=document.activeElement&&document.activeElement.id,val=keep&&document.activeElement.value;
  const storageNotice=storageMode==="memory"?'<div class="note">Armazenamento temporário em memória: configure o Postgres remoto para evitar perda de dados.</div>':"";
+ $("#logout").style.display=currentUser?"block":"none";
  $("#view").innerHTML=(loadError?`<div class="note">Não foi possível carregar as câmeras: ${esc(loadError)}</div>`:"")+storageNotice+view();
  if(keep&&$("#"+CSS.escape(keep))){const e=$("#"+CSS.escape(keep));if(val!==undefined)e.value=val}
 }
-function go(k){tab=k;history.replaceState(null,"","#"+k);draw();if(k==="whatsapp"){loadConversations();loadWaStatus()}if(k==="templates")loadTemplates();if(k==="reports")loadReports();if(k==="botconfig")loadBotCfg();if(k==="blocklist")loadBlockData()}
+function go(k){tab=k;history.replaceState(null,"","#"+k);draw();if(k==="instances"){loadInstances()}if(k==="diag"){loadDiag()}if(k==="whatsapp"){loadConversations();loadWaStatus()}if(k==="templates")loadTemplates();if(k==="reports")loadReports();if(k==="botconfig")loadBotCfg();if(k==="blocklist")loadBlockData()}
 function applyHash(){
  const initial=(location.hash||"").replace("#","");
  if(TABS.some(t=>t.k===initial)){tab=initial;draw();}
@@ -510,16 +628,13 @@ const removeTemplate=e.target.closest("[data-template-delete]");if(removeTemplat
 document.addEventListener("keydown",e=>{if(e.target.id==="f-id"&&(e.key==="Enter"||e.key===",")){e.preventDefault();pushIds();focusId()}});
 document.addEventListener("input",e=>{const t=e.target;if(t.id==="f-r"){fv.r=t.value;if(phones[t.value]){fv.p=phones[t.value];$("#f-p").value=fv.p}}if(t.id==="f-p")fv.p=t.value});
 $("#theme").onclick=()=>{const d=document.documentElement,dark=getComputedStyle(d).colorScheme==="dark";d.dataset.theme=dark?"light":"dark"};
+$("#logout").onclick=doLogout;
 setInterval(()=>{if(tab==="analisando")draw()},60000);
 setInterval(()=>{if(tab==="whatsapp"&&(waState.status==="qr"||waState.status==="connecting"))loadWaStatus()},3000);
 const initial=(location.hash||"").replace("#","");
 if(TABS.some(t=>t.k===initial))tab=initial;
 draw();
-if(tab==="whatsapp"){loadConversations();loadWaStatus()}
-if(tab==="templates")loadTemplates();
-if(tab==="reports")loadReports();
-if(tab==="botconfig")loadBotCfg();
-if(tab==="blocklist")loadBlockData();
+loadSession().then(()=>{if(!authRequired)afterLogin()});
 </script>
 </body>
 </html>

@@ -9,7 +9,7 @@ const {
 } = require('./whatsapp');
 
 test('ACK de entrega com fromMe=false é processado', () => {
-  const key = { id: '3EB0ACK', remoteJid: '556581367063@s.whatsapp.net', fromMe: false };
+  const key = { id: '3EB0ACK', remoteJid: '5548999990001@s.whatsapp.net', fromMe: false };
   assert.equal(shouldProcessStatusUpdate(key, { status: 3 }), true);
   assert.equal(shouldProcessStatusUpdate(key, { status: 4 }), true);
   assert.equal(shouldProcessStatusUpdate({ ...key, fromMe: true }, { status: 3 }), true);

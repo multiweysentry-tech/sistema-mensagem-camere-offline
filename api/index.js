@@ -153,7 +153,9 @@ try {
             }
           }
         );
-        return { ok: true, id: result.messages?.[0]?.id || null, deliveryStatus: 'unconfirmed' };
+        // A Cloud API responde com o id da mensagem aceita; nao ha receipt local
+        // para aguardar. "unconfirmed" fica restrito ao timeout do Baileys.
+        return { ok: true, id: result.messages?.[0]?.id || null, deliveryStatus: 'sent' };
       }
 
       throw missingWhatsAppConfiguration();

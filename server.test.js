@@ -633,7 +633,7 @@ test('DDD invalido e rejeitado no cadastro e na consulta do WhatsApp', async t =
   const invalidCheck = await jsonRequest(baseUrl, '/api/whatsapp/check/5510999990003');
   assert.equal(invalidCheck.response.status, 400);
 
-  const validCheck = await jsonRequest(baseUrl, '/api/whatsapp/check/556581367063');
+  const validCheck = await jsonRequest(baseUrl, '/api/whatsapp/check/5548999990001');
   assert.equal(validCheck.response.status, 200);
   assert.equal(validCheck.body.exists, true);
 });

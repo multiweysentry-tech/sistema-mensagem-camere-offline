@@ -112,8 +112,8 @@ test('serverless reports interactive delivery accurately without plain-text fall
       { id: '2', text: 'Preciso de suporte' }
     ]
   });
-  assert.equal(accepted.status, 202);
-  assert.equal(accepted.body.deliveryStatus, 'unconfirmed');
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.body.deliveryStatus, 'sent');
   assert.equal(accepted.body.id, 'meta-message-id');
   assert.equal(requests.length, 2);
   assert.equal(requests[1].type, 'interactive');
