@@ -7,7 +7,7 @@
   "functions": {
     "api/index.js": {
       "maxDuration": 10,
-      "includeFiles": ["index.html", "logo-sentry.png", "phone-utils.js", "lib/**"]
+      "includeFiles": "{index.html,logo-sentry.png,phone-utils.js,lib/**}"
     }
   }
 }
