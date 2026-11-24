@@ -78,6 +78,25 @@ O envio fica como pendente até chegar um status de entrega pelo webhook. Sem UR
 `META_WA_TENANT_ID` define o tenant associado às respostas recebidas (use `default` em uma instalação simples). O servidor exige o App Secret e o token de verificação para iniciar esse provider.
 Na Vercel, configure também um PostgreSQL remoto: o banco em memória não persiste entre invocações e não é adequado para correlacionar os envios com os webhooks.
 
+## WhatsApp pela Datafy
+
+O provider `datafy` usa a API oficial da Meta através da Datafy. O token `sk_live_` é enviado somente no header `Authorization`; o `phone_number_id` é consultado em `GET https://cloud.datafyapi.com.br/me` se não for configurado explicitamente. O UUID do canal não substitui esse ID e não é necessário para enviar mensagens.
+
+Configure as variáveis como Secrets no ambiente Production da Vercel (e no `.env` local, se aplicável):
+
+```dotenv
+WHATSAPP_PROVIDER=datafy
+DATAFY_WA_ACCESS_TOKEN=...
+DATAFY_WA_WEBHOOK_SECRET=...
+DATAFY_WA_TEMPLATE_NAME=sentry_camera_offline
+DATAFY_WA_TEMPLATE_LANGUAGE=pt_BR
+DATAFY_WA_TENANT_ID=default
+```
+
+`DATAFY_WA_WEBHOOK_SECRET` é o segredo `whsec_...` exibido na aba Webhooks do canal Datafy; ele é diferente do token `sk_live_`. Cadastre nessa aba o callback `https://SEU_DOMINIO/api/whatsapp/datafy/webhook` com o evento `messages`. A integração valida a assinatura HMAC da Datafy e os timestamps, e só marca a mensagem como entregue após receber o status correspondente. Mensagens livres dependem da janela de atendimento de 24 horas; fora dela, use um template aprovado. Para bots com botões, configure um template Utility aprovado contendo `{{1}}` e os três botões padrão descritos acima.
+
+O envio aceito pela API não prova entrega. Sem o webhook assinado, os envios permanecem pendentes. Se um token `sk_live_` foi compartilhado fora de um cofre de segredos, revogue/rotacione-o na Datafy antes de adicioná-lo à Vercel; nunca o coloque no código, Git ou chat.
+
 ## Central WhatsApp e diagnóstico
 
 - A aba **Central WhatsApp** mostra conversas e mensagens da instância selecionada, com envio manual e atualização em tempo real via Socket.IO no servidor local.
@@ -164,10 +183,11 @@ Defina estas variáveis de ambiente no projeto da Vercel (o `.env` local não é
 - `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE` — o PostgreSQL precisa estar acessível pela rede; `127.0.0.1` não funciona na Vercel.
 - Não defina `API_KEY` neste deploy: o painel não envia o cabeçalho `x-api-key` e todas as chamadas retornariam 401. Proteja o acesso com a **Password Protection** da Vercel ou restrição de IP.
 - Para escolher a API oficial no deploy: `WHATSAPP_PROVIDER=meta`, `META_WA_ACCESS_TOKEN`, `META_WA_PHONE_NUMBER_ID`, `META_WA_GRAPH_VERSION` (`v27.0`), `META_WA_TEMPLATE_NAME`, `META_WA_TEMPLATE_LANGUAGE`, `META_WA_APP_SECRET`, `META_WA_VERIFY_TOKEN` e, se necessário, `META_WA_TENANT_ID`. O callback é `https://SEU_DOMINIO/api/whatsapp/meta/webhook`; assine `messages` no webhook do app Meta. Se definir `META_WA_TIMEOUT_MS`, use no máximo 7000 ms na Vercel.
+- Para usar a API oficial pela Datafy: `WHATSAPP_PROVIDER=datafy`, `DATAFY_WA_ACCESS_TOKEN`, `DATAFY_WA_WEBHOOK_SECRET`, `DATAFY_WA_TEMPLATE_NAME` e `DATAFY_WA_TEMPLATE_LANGUAGE`. O callback é `https://SEU_DOMINIO/api/whatsapp/datafy/webhook`, inscrito em `messages`. O `phone_number_id` é resolvido por `/me` ou pode ser definido em `DATAFY_WA_PHONE_NUMBER_ID`. Em Production, mantenha o timeout `DATAFY_WA_TIMEOUT_MS` em até 7000 ms.
 - **Recomendado:** `WA_SERVER_URL`, `WA_API_KEY` e `WEBHOOK_SECRET` para usar o servidor Baileys persistente em `wa-server/`. O módulo `lib/whatsapp.js` mantém as credenciais apenas no servidor e o painel passa a mostrar status real de entrega. Opcionalmente `WA_CONFIRM_TIMEOUT_MINUTES` (padrão 15).
 - Ponte legada: `WHATSAPP_BRIDGE_URL` e opcionalmente `WHATSAPP_BRIDGE_KEY` (usada somente se `WA_SERVER_URL`/`WA_API_KEY` não estiverem definidos).
 
-O painel publicado na Vercel **não mantém sessão WhatsApp por QR**. Com `WHATSAPP_PROVIDER=meta`, o envio usa templates aprovados e os status de entrega e respostas chegam por `POST /api/whatsapp/meta/webhook`. Com `WA_SERVER_URL` configurado, o indicador da aba **Offline** consulta `/status` do servidor persistente e cada alerta exibe `na fila → enviada → entregue → lida` (ou `falhou` / `sem confirmação`) conforme os eventos assinados recebidos em `POST /api/whatsapp/webhook`. Sem webhook, o envio aceito não equivale a uma entrega. O botão **Conectar** da Central WhatsApp retorna `503` por design.
+O painel publicado na Vercel **não mantém sessão WhatsApp por QR**. Com `WHATSAPP_PROVIDER=meta`, o envio usa templates aprovados e os status de entrega e respostas chegam por `POST /api/whatsapp/meta/webhook`. Com `WHATSAPP_PROVIDER=datafy`, a API Datafy aceita o envio e os status de entrega/respostas chegam por `POST /api/whatsapp/datafy/webhook`. Com `WA_SERVER_URL` configurado, o indicador da aba **Offline** consulta `/status` do servidor persistente e cada alerta exibe `na fila → enviada → entregue → lida` (ou `falhou` / `sem confirmação`) conforme os eventos assinados recebidos em `POST /api/whatsapp/webhook`. Sem webhook, o envio aceito não equivale a uma entrega. O botão **Conectar** da Central WhatsApp retorna `503` por design.
 
 O adaptador Meta devolve `deliveryStatus: "pendente"` quando a Cloud API aceita a mensagem e retorna um id. O status só avança com o webhook de entrega; `unconfirmed` fica reservado ao timeout do receipt no Baileys local. A Vercel permite envio manual e recebimento do webhook, mas não executa os bots locais nem mantém workers em segundo plano.
 

@@ -12,6 +12,7 @@ const { isRemote: hasRemotePostgres } = require('../db-config');
 const { normalizarContato } = require('../phone-utils');
 const whatsappRemoto = require('../lib/whatsapp');
 const { createMetaWhatsapp } = require('../lib/meta-whatsapp');
+const { createDatafyWhatsapp } = require('../lib/datafy-whatsapp');
 
 const unavailable = feature =>
   new Error(`${feature} indisponível no Vercel: exige processo persistente. Use npm start em um servidor próprio.`);
@@ -53,8 +54,8 @@ try {
   const metaPhoneId = String(process.env.META_WA_PHONE_NUMBER_ID || '').trim();
   const metaEnabled = Boolean(metaToken && metaPhoneId);
   const requestedProvider = String(process.env.WHATSAPP_PROVIDER || '').trim().toLowerCase();
-  if (!['', 'meta', 'baileys'].includes(requestedProvider)) {
-    throw new Error('WHATSAPP_PROVIDER deve ser "meta" ou "baileys" no deploy Vercel');
+  if (!['', 'meta', 'datafy', 'baileys'].includes(requestedProvider)) {
+    throw new Error('WHATSAPP_PROVIDER deve ser "meta", "datafy" ou "baileys" no deploy Vercel');
   }
   if (requestedProvider === 'meta' && !metaEnabled) {
     throw new Error('WHATSAPP_PROVIDER=meta exige META_WA_ACCESS_TOKEN e META_WA_PHONE_NUMBER_ID');
@@ -62,23 +63,28 @@ try {
   const metaWa = requestedProvider === 'meta' || (!requestedProvider && !whatsappRemoto.isRemoteConfigured() && !bridgeUrl && metaEnabled)
     ? createMetaWhatsapp({ db })
     : null;
+  const datafyWa = requestedProvider === 'datafy' ? createDatafyWhatsapp({ db }) : null;
+  const cloudWa = metaWa || datafyWa;
   if (metaWa && (!metaWa.webhookConfig.secret || !metaWa.webhookConfig.verifyToken)) {
     throw new Error('WhatsApp Meta no Vercel exige META_WA_APP_SECRET e META_WA_VERIFY_TOKEN para validar o webhook');
   }
-  const remoto = metaWa ? null : whatsappRemoto.isRemoteConfigured() ? whatsappRemoto.createRemoteWhatsapp() : null;
-  const activeBridgeUrl = metaWa ? null : bridgeUrl;
-  const waConfigured = Boolean(remoto || activeBridgeUrl || metaWa);
+  if (datafyWa && !datafyWa.webhookConfig.secret) {
+    throw new Error('WhatsApp Datafy no Vercel exige DATAFY_WA_WEBHOOK_SECRET para validar eventos de entrega');
+  }
+  const remoto = cloudWa ? null : whatsappRemoto.isRemoteConfigured() ? whatsappRemoto.createRemoteWhatsapp() : null;
+  const activeBridgeUrl = cloudWa ? null : bridgeUrl;
+  const waConfigured = Boolean(remoto || activeBridgeUrl || cloudWa);
   const missingWhatsAppConfiguration = () => {
     return new Error('A Vercel não mantém uma sessão WhatsApp via QR. Para usar seu WhatsApp e os bots, abra http://127.0.0.1:3000/#offline no computador onde o servidor persistente está rodando.');
   };
 
   wa = {
-    provider: metaWa ? 'meta' : undefined,
-    remote: Boolean(metaWa),
-    webhookConfig: metaWa?.webhookConfig,
-    setIO(socketServer) { metaWa?.setIO(socketServer); },
-    getStatus: () => metaWa
-      ? metaWa.getStatus()
+    provider: cloudWa?.provider,
+    remote: Boolean(cloudWa),
+    webhookConfig: cloudWa?.webhookConfig,
+    setIO(socketServer) { cloudWa?.setIO(socketServer); },
+    getStatus: () => cloudWa
+      ? cloudWa.getStatus()
       : waConfigured
       ? {
           status: 'configured',
@@ -112,7 +118,7 @@ try {
         return result;
       }
 
-      if (metaWa) return metaWa.sendMessage(digits, text, metadata);
+      if (cloudWa) return cloudWa.sendMessage(digits, text, metadata);
 
       throw missingWhatsAppConfiguration();
     },
@@ -135,7 +141,7 @@ try {
         );
       }
 
-      if (metaWa) return metaWa.sendWithOptions(digits, text, options, footer, metadata);
+      if (cloudWa) return cloudWa.sendWithOptions(digits, text, options, footer, metadata);
 
       throw missingWhatsAppConfiguration();
     },

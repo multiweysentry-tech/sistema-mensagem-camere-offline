@@ -133,11 +133,15 @@ function createApp(options = {}) {
     logger: logWebhook,
     timeoutMinutes: Number(process.env.WA_CONFIRM_TIMEOUT_MINUTES || 15)
   });
-  if (wa.provider === 'meta') {
+  if (wa.provider === 'meta' || wa.provider === 'datafy') {
     registerMetaWebhook(app, {
       db,
       bots,
       ...wa.webhookConfig,
+      route: wa.webhookConfig.route,
+      signatureValidator: wa.webhookConfig.signatureValidator,
+      providerName: wa.provider === 'datafy' ? 'Datafy' : 'Meta',
+      enableHandshake: wa.provider === 'meta',
       logger: logWebhook
     });
   }
@@ -188,6 +192,7 @@ function createApp(options = {}) {
     res.set('Cache-Control', 'public, max-age=0');
     return res.sendFile(path.join(__dirname, 'phone-utils.js'));
   });
+  app.use('/painel-noc', express.static(path.join(__dirname, 'painel-noc')));
   app.use((err, req, res, next) => {
     if (err && err.type === 'entity.parse.failed') {
       return res.status(400).json({ codigo: 'INVALID_JSON', erro: 'JSON invalido' });
@@ -981,27 +986,37 @@ if (require.main === module) {
 
   const db = require('./db');
   const { createMetaWhatsapp, isConfigured: isMetaConfigured } = require('./lib/meta-whatsapp');
+  const { createDatafyWhatsapp, isConfigured: isDatafyConfigured } = require('./lib/datafy-whatsapp');
   const provider = String(process.env.WHATSAPP_PROVIDER || 'baileys').trim().toLowerCase();
-  if (!['baileys', 'meta'].includes(provider)) {
-    throw new Error('WHATSAPP_PROVIDER deve ser "baileys" ou "meta"');
+  if (!['baileys', 'meta', 'datafy'].includes(provider)) {
+    throw new Error('WHATSAPP_PROVIDER deve ser "baileys", "meta" ou "datafy"');
   }
   const metaConfigurado = provider === 'meta';
+  const datafyConfigurado = provider === 'datafy';
   if (metaConfigurado && !isMetaConfigured()) {
     throw new Error('WHATSAPP_PROVIDER=meta exige META_WA_ACCESS_TOKEN e META_WA_PHONE_NUMBER_ID');
   }
-  const remotoConfigurado = !metaConfigurado && whatsappRemoto.isRemoteConfigured();
-  const wa = metaConfigurado
-    ? createMetaWhatsapp({ db })
-    : remotoConfigurado
-      ? whatsappRemoto.createRemoteWhatsapp()
-      : require('./whatsapp');
+  if (datafyConfigurado && !isDatafyConfigured()) {
+    throw new Error('WHATSAPP_PROVIDER=datafy exige DATAFY_WA_ACCESS_TOKEN');
+  }
+  const remotoConfigurado = !metaConfigurado && !datafyConfigurado && whatsappRemoto.isRemoteConfigured();
+  const wa = datafyConfigurado
+    ? createDatafyWhatsapp({ db })
+    : metaConfigurado
+      ? createMetaWhatsapp({ db })
+      : remotoConfigurado
+        ? whatsappRemoto.createRemoteWhatsapp()
+        : require('./whatsapp');
   if (metaConfigurado && (!wa.webhookConfig.secret || !wa.webhookConfig.verifyToken)) {
     throw new Error('WHATSAPP_PROVIDER=meta exige META_WA_APP_SECRET e META_WA_VERIFY_TOKEN para validar o webhook');
+  }
+  if (datafyConfigurado && !wa.webhookConfig.secret) {
+    throw new Error('WHATSAPP_PROVIDER=datafy exige DATAFY_WA_WEBHOOK_SECRET para validar eventos de entrega');
   }
   const auth = process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD ? createAuth({ db }) : null;
 
   let bots = botsModule;
-  const sessionManager = remotoConfigurado || metaConfigurado ? null : createSessionManager({
+  const sessionManager = remotoConfigurado || metaConfigurado || datafyConfigurado ? null : createSessionManager({
     db,
     resolveBots: () => bots
   });

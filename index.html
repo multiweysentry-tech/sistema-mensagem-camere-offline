@@ -128,6 +128,7 @@ const TABS=[
  {k:"diag",t:"Diagnóstico",d:"Estado real de sessões, fila e armazenamento para investigar falhas."},
  {k:"templates",t:"Modelos",d:"Cadastrar, editar e testar modelos de mensagem com variáveis dinâmicas."},
  {k:"reports",t:"Relatórios",d:"Indicadores e métricas do sistema."},
+ {k:"painelnoc",t:"Painel NOC",d:"Painel NOC de c?meras offline (CSV)."},
  {k:"botconfig",t:"Config. Bots",d:"Configurar agendamentos, limites e modo de operação dos bots."},
  {k:"blocklist",t:"Bloqueio",d:"Gerenciar lista de bloqueio e consentimento de contatos."}
 ];
@@ -662,6 +663,18 @@ function blockView(){
   </div>
  </div>`;
 }
+
+function painelnocView(){
+ const T=TABS.find(x=>x.k===tab);
+ return `<h1>Painel NOC</h1><p class="lead">${esc(T?T.d:"Painel NOC de c?meras offline.")}</p>
+ <div class="box" style="padding:0;overflow:hidden">
+  <div class="act" style="padding:12px 14px;border-bottom:1px solid var(--line);justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+   <span class="sub" style="padding:0">Painel NOC incorporado ao sistema. Os arquivos ficam em <code>painel-noc/</code>.</span>
+   <a class="btn s" href="/painel-noc/" target="_blank" rel="noopener">Abrir em nova aba</a>
+  </div>
+  <iframe src="/painel-noc/" title="Painel NOC" style="width:100%;height:calc(100vh - 220px);min-height:640px;border:0;background:#fff"></iframe>
+ </div>`;
+}
 function view(){
  if(authRequired)return loginView();
  if(tab==="instances")return instancesView();
@@ -695,8 +708,8 @@ function pushIds(){const e=$("#f-id");if(!e)return;e.value.split(/[,;\s]+/).map(
 function focusId(){const e=$("#f-id");if(e)e.focus()}
 function draw(){
  if(authRequired){$("#nav").innerHTML="";$("#view").innerHTML=loginView();return}
- const ICONS={dash:"📊",offline:"⚠️",notificado:"🔔",analisando:"🔍",aguardando:"🛠️",validacao:"☑️",resolvido:"✅",whatsapp:"💬",instances:"📱",diag:"🩺",templates:"📝",reports:"📈",botconfig:"⚙️",blocklist:"🚫"};
- $("#nav").innerHTML=TABS.map(t=>`<button data-k="${t.k}" class="${t.k===tab?"on":""}"><span>${ICONS[t.k]||""} ${t.t}</span>${t.k==="dash"?"":`<span class="n">${new Set(cams.filter(c=>c.status===t.k).map(c=>c.resp)).size}</span>`}</button>`).join("");
+ const ICONS={dash:"📊",offline:"⚠️",notificado:"🔔",analisando:"🔍",aguardando:"🛠️",validacao:"☑️",resolvido:"✅",whatsapp:"💬",instances:"📱",diag:"🩺",templates:"📝",reports:"📈",painelnoc:"??",botconfig:"??",blocklist:"🚫"};
+ $("#nav").innerHTML=TABS.map(t=>`<button data-k="${t.k}" class="${t.k===tab?"on":""}"><span>${ICONS[t.k]||""} ${t.t}</span>${(t.k==="dash"||t.k==="painelnoc")?"":`<span class="n">${new Set(cams.filter(c=>c.status===t.k).map(c=>c.resp)).size}</span>`}</button>`).join("");
  const keep=document.activeElement&&document.activeElement.id,val=keep&&document.activeElement.value;
  const storageNotice=storageMode==="memory"?'<div class="note">Armazenamento temporário em memória: configure o Postgres remoto para evitar perda de dados.</div>':"";
  $("#logout").style.display=currentUser?"block":"none";

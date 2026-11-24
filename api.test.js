@@ -184,3 +184,68 @@ test('Vercel Meta provider uses approved templates and reports pending delivery'
   const deliveries = await requestJson(port, '/api/whatsapp/delivery');
   assert.equal(deliveries.body.entregas[0].status, 'entregue');
 });
+
+test('Vercel Datafy provider resolves its number id and registers the signed webhook', async t => {
+  const environmentKeys = [
+    'VERCEL', 'API_KEY', 'DATABASE_URL', 'POSTGRES_URL', 'PG_HOST', 'PG_PASSWORD',
+    'META_WA_ACCESS_TOKEN', 'META_WA_PHONE_NUMBER_ID', 'META_WA_APP_SECRET', 'META_WA_VERIFY_TOKEN',
+    'DATAFY_WA_ACCESS_TOKEN', 'DATAFY_WA_PHONE_NUMBER_ID', 'DATAFY_WA_WEBHOOK_SECRET',
+    'DATAFY_WA_TIMEOUT_MS', 'WHATSAPP_PROVIDER', 'WHATSAPP_BRIDGE_URL'
+  ];
+  const previousEnvironment = new Map(environmentKeys.map(key => [key, process.env[key]]));
+  const previousFetch = global.fetch;
+  process.env.VERCEL = '1';
+  process.env.API_KEY = '';
+  process.env.DATABASE_URL = '';
+  process.env.POSTGRES_URL = '';
+  process.env.PG_HOST = '127.0.0.1';
+  process.env.PG_PASSWORD = '';
+  process.env.META_WA_ACCESS_TOKEN = '';
+  process.env.META_WA_PHONE_NUMBER_ID = '';
+  process.env.META_WA_APP_SECRET = '';
+  process.env.META_WA_VERIFY_TOKEN = '';
+  process.env.DATAFY_WA_ACCESS_TOKEN = 'test-datafy-token';
+  process.env.DATAFY_WA_PHONE_NUMBER_ID = '';
+  process.env.DATAFY_WA_WEBHOOK_SECRET = 'test-datafy-webhook-secret';
+  process.env.DATAFY_WA_TIMEOUT_MS = '';
+  process.env.WHATSAPP_PROVIDER = 'datafy';
+  process.env.WHATSAPP_BRIDGE_URL = '';
+
+  const handlerPath = require.resolve('./api/index');
+  delete require.cache[handlerPath];
+  const requests = [];
+  global.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return new Response(JSON.stringify({ phone_number_id: 'resolved-phone-id' }), { status: 200 });
+  };
+  const handler = require('./api/index');
+  const server = http.createServer((request, response) => handler(request, response));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    global.fetch = previousFetch;
+    await new Promise(resolve => server.close(resolve));
+    delete require.cache[handlerPath];
+    for (const [key, value] of previousEnvironment) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const status = await requestJson(server.address().port, '/api/whatsapp/status');
+  assert.equal(status.status, 200);
+  assert.equal(status.body.provider, 'datafy');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'https://cloud.datafyapi.com.br/me');
+  assert.equal(requests[0].options.headers.Authorization, 'Bearer test-datafy-token');
+
+  const webhook = await requestRaw(server.address().port, '/api/whatsapp/datafy/webhook', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-datafy-signature-256': 'sha256=invalid',
+      'x-datafy-timestamp': String(Math.floor(Date.now() / 1000))
+    },
+    body: '{}'
+  });
+  assert.equal(webhook.status, 401);
+});
