@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Painel NOC — Câmeras Offline</title>
+<style>
+  :root{
+    --bg:#0b1120; --panel:#111a2e; --panel2:#0e1626; --border:#1e2a44;
+    --text:#e2e8f0; --muted:#8ea0bd; --accent:#38bdf8;
+    --green:#22c55e; --yellow:#eab308; --orange:#f97316; --red:#ef4444; --darkred:#b91c1c; --purple:#a855f7;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,-apple-system,sans-serif;font-size:14px}
+  .wrap{max-width:1500px;margin:0 auto;padding:20px}
+  header{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px;margin-bottom:6px}
+  header h1{font-size:22px;font-weight:700}
+  header h1 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--red);margin-right:8px;box-shadow:0 0 8px var(--red);animation:pulse 1.6s infinite}
+  @keyframes pulse{50%{opacity:.4}}
+  .sub{color:var(--muted);font-size:12px;margin-bottom:18px}
+  /* KPIs */
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}
+  .kpi{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+  .kpi .v{font-size:26px;font-weight:700;line-height:1.2}
+  .kpi .l{color:var(--muted);font-size:12px;margin-top:2px}
+  .kpi.red .v{color:var(--red)} .kpi.green .v{color:var(--green)} .kpi.yellow .v{color:var(--yellow)}
+  .kpi.orange .v{color:var(--orange)} .kpi.purple .v{color:var(--purple)} .kpi.blue .v{color:var(--accent)}
+  /* Charts */
+  .charts{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:12px;margin-bottom:18px}
+  @media(max-width:1000px){.charts{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px}
+  .card h3{font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:12px}
+  .bar-row{display:grid;grid-template-columns:170px 1fr 42px;align-items:center;gap:8px;margin-bottom:7px;font-size:12px}
+  .bar-row .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right;color:var(--text)}
+  .bar-track{background:var(--panel2);border-radius:4px;height:16px;overflow:hidden}
+  .bar-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,#0ea5e9,#38bdf8);min-width:2px}
+  .bar-row .num{font-weight:600;color:var(--accent)}
+  .sev-row{display:grid;grid-template-columns:130px 1fr 42px;align-items:center;gap:8px;margin-bottom:9px;font-size:12px}
+  .legend{display:flex;flex-direction:column;gap:7px;font-size:12px;margin-top:10px}
+  .legend .li{display:flex;align-items:center;gap:8px}
+  .legend .sw{width:11px;height:11px;border-radius:3px;flex:none}
+  .legend .cnt{margin-left:auto;font-weight:600}
+  .donut-wrap{display:flex;justify-content:center;padding:6px 0}
+  .donut{width:150px;height:150px;border-radius:50%;position:relative}
+  .donut::after{content:"";position:absolute;inset:28px;border-radius:50%;background:var(--panel)}
+  .donut .center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:1}
+  .donut .center b{font-size:22px} .donut .center span{font-size:10px;color:var(--muted)}
+  /* Filters */
+  .filters{display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:14px}
+  .filters input[type=search]{flex:1;min-width:220px;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:8px 12px;font-size:13px;outline:none}
+  .filters input[type=search]:focus{border-color:var(--accent)}
+  .filters select{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:8px 10px;font-size:13px;outline:none;max-width:230px}
+  .btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:8px 14px;font-size:13px;cursor:pointer;transition:.15s}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn.active{background:var(--accent);color:#04121f;border-color:var(--accent);font-weight:600}
+  .count-info{color:var(--muted);font-size:12px;margin-left:auto}
+  /* Table */
+  .table-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .table-scroll{overflow:auto;max-height:70vh}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  thead th{position:sticky;top:0;background:#16213a;color:var(--muted);text-transform:uppercase;font-size:10.5px;letter-spacing:.4px;padding:10px 10px;text-align:left;cursor:pointer;user-select:none;white-space:nowrap;border-bottom:1px solid var(--border);z-index:2}
+  thead th:hover{color:var(--accent)}
+  thead th .arrow{color:var(--accent)}
+  tbody td{padding:8px 10px;border-bottom:1px solid #16203a;vertical-align:top}
+  tbody tr:hover{background:#152036}
+  td.nome{max-width:420px;font-weight:500}
+  td.resp{max-width:230px;color:var(--muted);font-size:11.5px}
+  .badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600;white-space:nowrap}
+  .b-off{background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.4)}
+  .b-on{background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.4)}
+  .sev{display:inline-block;padding:2px 9px;border-radius:6px;font-size:11px;font-weight:600;white-space:nowrap;color:#fff}
+  .sla{font-weight:700}
+  .sla.g{color:var(--green)} .sla.y{color:var(--yellow)} .sla.o{color:var(--orange)} .sla.r{color:var(--red)}
+  .tag{display:inline-block;background:var(--panel2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:1px 7px;font-size:10.5px;white-space:nowrap}
+  .muted{color:var(--muted)}
+  .num-cell{text-align:right;font-variant-numeric:tabular-nums}
+  /* Municipality summary */
+  .mun-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px;padding:14px}
+  .mun-card{background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:12px 14px;cursor:pointer;transition:.15s}
+  .mun-card:hover{border-color:var(--accent)}
+  .mun-card h4{font-size:13px;margin-bottom:6px}
+  .mun-card .stats{display:flex;gap:12px;font-size:11.5px;color:var(--muted)}
+  .mun-card .stats b{color:var(--text)}
+  .mun-card .off b{color:var(--red)}
+  footer{color:var(--muted);font-size:11.5px;text-align:center;margin:18px 0 6px}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="dot"></span>Painel NOC — Monitoramento de Câmeras</h1>
+  </header>
+  <div class="sub" id="subtitulo"></div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="charts">
+    <div class="card">
+      <h3>Top municípios — câmeras offline</h3>
+      <div id="chartMunicipios"></div>
+    </div>
+    <div class="card">
+      <h3>Tempo offline (severidade)</h3>
+      <div id="chartSeveridade"></div>
+    </div>
+    <div class="card">
+      <h3>Categorias</h3>
+      <div class="donut-wrap"><div class="donut" id="donut"><div class="center"><b id="donutTotal"></b><span>câmeras</span></div></div></div>
+      <div class="legend" id="legendCategorias"></div>
+    </div>
+  </div>
+
+  <div class="filters">
+    <input type="search" id="busca" placeholder="🔍 Buscar por nome, ID, município, responsável...">
+    <select id="fMunicipio"><option value="">Todos os municípios</option></select>
+    <select id="fCategoria"><option value="">Todas as categorias</option></select>
+    <select id="fSeveridade">
+      <option value="">Qualquer tempo offline</option>
+      <option value="s0">Recente (&lt; 1h)</option>
+      <option value="s1">1h – 24h</option>
+      <option value="s2">1 – 3 dias</option>
+      <option value="s3">3 – 7 dias</option>
+      <option value="s4">Crítico (&gt; 7 dias)</option>
+    </select>
+    <select id="fStatus">
+      <option value="">Online + Offline</option>
+      <option value="Offline" selected>Somente Offline</option>
+      <option value="Online">Somente Online</option>
+    </select>
+    <button class="btn active" id="btnTabela">📋 Tabela</button>
+    <button class="btn" id="btnMunicipios">🏙️ Municípios</button>
+    <button class="btn" id="btnExport">⬇️ Exportar CSV</button>
+    <button class="btn" id="btnLimpar">✖ Limpar</button>
+    <span class="count-info" id="countInfo"></span>
+  </div>
+
+  <div class="table-card" id="viewTabela">
+    <div class="table-scroll">
+      <table>
+        <thead><tr id="theadRow"></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="table-card hidden" id="viewMunicipios">
+    <div class="mun-grid" id="munGrid"></div>
+  </div>
+
+  <footer id="rodape"></footer>
+</div>
+
+<script>
+const PAYLOAD = /*__DATA__*/null;
+const { stats, data, resumoMunicipios } = PAYLOAD;
+
+/* ---------- Severidade ---------- */
+const SEVS = [
+  { key:'s0', label:'Recente (< 1h)',   color:'#eab308', test:m=>m<60 },
+  { key:'s1', label:'1h – 24h',         color:'#f97316', test:m=>m<1440 },
+  { key:'s2', label:'1 – 3 dias',       color:'#ef4444', test:m=>m<4320 },
+  { key:'s3', label:'3 – 7 dias',       color:'#b91c1c', test:m=>m<10080 },
+  { key:'s4', label:'Crítico (> 7d)',   color:'#a855f7', test:()=>true },
+];
+function sevDe(d){
+  if(d.status==='Online') return null;
+  return SEVS.find(s=>s.test(d.offlineMin));
+}
+function slaClass(v){ return v>=90?'g':v>=60?'y':v>=30?'o':'r'; }
+function fmtMin(m){
+  if(m<=0) return '—';
+  const d=Math.floor(m/1440), h=Math.floor(m%1440/60), mm=m%60;
+  return (d?d+'d ':'')+(h?h+'h ':'')+(mm?mm+'min':'').trim() || '0min';
+}
+const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+/* ---------- Cabeçalho / KPIs ---------- */
+document.getElementById('subtitulo').textContent =
+  `Fonte: ${stats.arquivoFonte} · Painel gerado em ${stats.geradoEm} · Dados 100% locais (funciona sem internet)`;
+document.getElementById('rodape').textContent =
+  `Painel NOC local · ${stats.total} câmeras monitoradas em ${stats.municipios} municípios de Mato Grosso · Gerado em ${stats.geradoEm}`;
+
+const kpis = [
+  { v:stats.total,            l:'Câmeras no relatório',   c:'blue' },
+  { v:stats.offline,          l:'Offline agora',          c:'red' },
+  { v:stats.online,           l:'Online',                 c:'green' },
+  { v:stats.municipiosAfetados+'/'+stats.municipios, l:'Municípios afetados', c:'orange' },
+  { v:stats.mais24h,          l:'Offline há mais de 24h', c:'orange' },
+  { v:stats.mais7d,           l:'Críticas (> 7 dias)',    c:'purple' },
+  { v:stats.desc24Total.toLocaleString('pt-BR'), l:'Desconexões em 24h', c:'yellow' },
+  { v:stats.slaMedio+'%',     l:'SLA médio (total)',      c:'blue' },
+];
+document.getElementById('kpis').innerHTML = kpis.map(k=>
+  `<div class="kpi ${k.c}"><div class="v">${k.v}</div><div class="l">${k.l}</div></div>`).join('');
+
+/* ---------- Gráfico: municípios ---------- */
+const topMun = resumoMunicipios.filter(m=>m.offline>0).slice(0,12);
+const maxOff = Math.max(...topMun.map(m=>m.offline),1);
+document.getElementById('chartMunicipios').innerHTML = topMun.map(m=>
+  `<div class="bar-row" title="${esc(m.municipio)}: ${m.offline} offline de ${m.total}">
+     <span class="name">${esc(m.municipio)}</span>
+     <div class="bar-track"><div class="bar-fill" style="width:${(m.offline/maxOff*100).toFixed(1)}%"></div></div>
+     <span class="num">${m.offline}</span>
+   </div>`).join('');
+
+/* ---------- Gráfico: severidade ---------- */
+const sevCounts = SEVS.map(s=>({...s, n:data.filter(d=>{const x=sevDe(d);return x&&x.key===s.key;}).length}));
+const maxSev = Math.max(...sevCounts.map(s=>s.n),1);
+document.getElementById('chartSeveridade').innerHTML = sevCounts.map(s=>
+  `<div class="sev-row">
+     <span><span class="sev" style="background:${s.color}">${s.label}</span></span>
+     <div class="bar-track"><div class="bar-fill" style="width:${(s.n/maxSev*100).toFixed(1)}%;background:${s.color}"></div></div>
+     <span class="num" style="color:${s.color}">${s.n}</span>
+   </div>`).join('');
+
+/* ---------- Donut: categorias ---------- */
+const catColors = ['#38bdf8','#22c55e','#f97316','#a855f7','#eab308','#ef4444','#14b8a6','#f472b6','#8ea0bd'];
+const catCounts = {};
+data.forEach(d=>catCounts[d.categoria]=(catCounts[d.categoria]||0)+1);
+const cats = Object.entries(catCounts).sort((a,b)=>b[1]-a[1]);
+let acc=0; const stops=[];
+cats.forEach(([nome,n],i)=>{
+  const c=catColors[i%catColors.length], from=acc/data.length*360; acc+=n;
+  stops.push(`${c} ${from.toFixed(1)}deg ${(acc/data.length*360).toFixed(1)}deg`);
+});
+document.getElementById('donut').style.background = `conic-gradient(${stops.join(',')})`;
+document.getElementById('donutTotal').textContent = data.length;
+document.getElementById('legendCategorias').innerHTML = cats.map(([nome,n],i)=>
+  `<div class="li"><span class="sw" style="background:${catColors[i%catColors.length]}"></span>${esc(nome)}<span class="cnt">${n}</span></div>`).join('');
+
+/* ---------- Filtros ---------- */
+const $ = id=>document.getElementById(id);
+const municipios = [...new Set(data.map(d=>d.municipio))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+municipios.forEach(m=>$('fMunicipio').insertAdjacentHTML('beforeend',`<option>${esc(m)}</option>`));
+cats.forEach(([c])=>$('fCategoria').insertAdjacentHTML('beforeend',`<option>${esc(c)}</option>`));
+
+let sortKey='offlineMin', sortDir=-1;
+const COLS = [
+  {k:'id',        l:'ID'},
+  {k:'nome',      l:'Câmera / Local'},
+  {k:'municipio', l:'Município'},
+  {k:'categoria', l:'Categoria'},
+  {k:'responsaveis', l:'Responsáveis', nosort:true},
+  {k:'status',    l:'Status'},
+  {k:'offlineMin',l:'Tempo offline'},
+  {k:'ultimo',    l:'Último status'},
+  {k:'desc24',    l:'Desc. 24h'},
+  {k:'sla24',     l:'SLA 24h'},
+  {k:'slaTotal',  l:'SLA total'},
+];
+
+function filtrar(){
+  const q = $('busca').value.trim().toLowerCase();
+  const fm=$('fMunicipio').value, fc=$('fCategoria').value, fs=$('fSeveridade').value, fst=$('fStatus').value;
+  let out = data.filter(d=>{
+    if(fst && d.status!==fst) return false;
+    if(fm && d.municipio!==fm) return false;
+    if(fc && d.categoria!==fc) return false;
+    if(fs){ const s=sevDe(d); if(!s||s.key!==fs) return false; }
+    if(q){
+      const hay=(d.id+' '+d.nome+' '+d.municipio+' '+d.responsaveis.join(' ')+' '+d.marcadores).toLowerCase();
+      if(!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  out.sort((a,b)=>{
+    let va=a[sortKey], vb=b[sortKey];
+    if(sortKey==='ultimo'){ va=a.ultimoTs||0; vb=b.ultimoTs||0; }
+    if(Array.isArray(va)){ va=va.join(' '); vb=vb.join(' '); }
+    if(typeof va==='string') return sortDir*va.localeCompare(vb,'pt-BR');
+    return sortDir*((va||0)-(vb||0));
+  });
+  return out;
+}
+
+function renderTabela(){
+  const rows = filtrar();
+  $('theadRow').innerHTML = COLS.map(c=>{
+    const arrow = c.k===sortKey ? ` <span class="arrow">${sortDir>0?'▲':'▼'}</span>` : '';
+    return `<th data-k="${c.k}" ${c.nosort?'data-nosort="1"':''}>${c.l}${arrow}</th>`;
+  }).join('');
+  $('tbody').innerHTML = rows.map(d=>{
+    const s = sevDe(d);
+    const statusB = d.status==='Online' ? '<span class="badge b-on">● Online</span>' : '<span class="badge b-off">● Offline</span>';
+    const tempo = d.status==='Online' ? '<span class="muted">—</span>'
+      : `<span class="sev" style="background:${s.color}">${esc(d.offlineStr)}</span>`;
+    const resp = d.responsaveis.length ? esc(d.responsaveis.join(' · ')) : '<span class="muted">— sem responsável —</span>';
+    const tag = d.marcadores ? ` <span class="tag">${esc(d.marcadores)}</span>` : '';
+    return `<tr>
+      <td class="num-cell muted">${d.id}</td>
+      <td class="nome">${esc(d.nome)}${tag}</td>
+      <td>${esc(d.municipio)}</td>
+      <td><span class="tag">${esc(d.categoria)}</span></td>
+      <td class="resp">${resp}</td>
+      <td>${statusB}</td>
+      <td>${tempo}</td>
+      <td class="muted" style="white-space:nowrap">${esc(d.ultimo)||'—'}</td>
+      <td class="num-cell ${d.desc24>=100?'sla r':d.desc24>=10?'sla o':''}">${d.desc24.toLocaleString('pt-BR')}</td>
+      <td class="num-cell sla ${slaClass(d.sla24)}">${d.sla24}%</td>
+      <td class="num-cell sla ${slaClass(d.slaTotal)}">${d.slaTotal}%</td>
+    </tr>`;
+  }).join('');
+  $('countInfo').textContent = `${rows.length} de ${data.length} câmeras`;
+  $('theadRow').querySelectorAll('th').forEach(th=>{
+    if(th.dataset.nosort) return;
+    th.onclick=()=>{
+      const k=th.dataset.k;
+      if(sortKey===k) sortDir*=-1; else { sortKey=k; sortDir = (k==='nome'||k==='municipio'||k==='categoria'||k==='id')?1:-1; }
+      renderTabela();
+    };
+  });
+}
+
+function renderMunicipios(){
+  const rows = filtrar();
+  const agg={};
+  rows.forEach(d=>{
+    const m=agg[d.municipio]||(agg[d.municipio]={total:0,off:0,desc:0,sla:0,max:0});
+    m.total++; m.desc+=d.desc24; m.sla+=d.slaTotal;
+    if(d.status!=='Online'){m.off++;m.max=Math.max(m.max,d.offlineMin);}
+  });
+  const list=Object.entries(agg).sort((a,b)=>b[1].off-a[1].off||a[0].localeCompare(b[0],'pt-BR'));
+  $('munGrid').innerHTML = list.map(([nome,m])=>
+    `<div class="mun-card" data-mun="${esc(nome)}" title="Clique para filtrar a tabela por este município">
+       <h4>${esc(nome)}</h4>
+       <div class="stats">
+         <span class="off"><b>${m.off}</b> offline</span>
+         <span><b>${m.total}</b> câmeras</span>
+         <span>SLA <b class="sla ${slaClass(Math.round(m.sla/m.total))}">${Math.round(m.sla/m.total)}%</b></span>
+       </div>
+       <div class="stats" style="margin-top:4px">
+         <span>Maior parada: <b>${fmtMin(m.max)}</b></span>
+         <span>Desc. 24h: <b>${m.desc.toLocaleString('pt-BR')}</b></span>
+       </div>
+     </div>`).join('') || '<div class="muted" style="padding:10px">Nenhum resultado para os filtros atuais.</div>';
+  $('munGrid').querySelectorAll('.mun-card').forEach(c=>{
+    c.onclick=()=>{ $('fMunicipio').value=c.dataset.mun; $('fStatus').value=''; mostrar('tabela'); renderTabela(); };
+  });
+  $('countInfo').textContent = `${list.length} municípios · ${rows.length} câmeras`;
+}
+
+function mostrar(view){
+  const tab = view==='tabela';
+  $('viewTabela').classList.toggle('hidden',!tab);
+  $('viewMunicipios').classList.toggle('hidden',tab);
+  $('btnTabela').classList.toggle('active',tab);
+  $('btnMunicipios').classList.toggle('active',!tab);
+  tab ? renderTabela() : renderMunicipios();
+}
+
+/* ---------- Export CSV ---------- */
+function exportar(){
+  const rows=filtrar();
+  const head='ID;Nome;Município;Categoria;Responsáveis;Marcadores;Status;Último status;Tempo offline;Desconexões 24h;SLA 24h;SLA total';
+  const lines=rows.map(d=>[d.id,d.nome,d.municipio,d.categoria,d.responsaveis.join(' | '),d.marcadores,d.status,d.ultimo,d.offlineStr,d.desc24,d.sla24+'%',d.slaTotal+'%']
+    .map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(';'));
+  const blob=new Blob(['﻿'+[head,...lines].join('\r\n')],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download='noc-filtrado.csv'; a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/* ---------- Eventos ---------- */
+['busca','fMunicipio','fCategoria','fSeveridade','fStatus'].forEach(id=>{
+  $(id).addEventListener('input',()=>mostrar($('viewTabela').classList.contains('hidden')?'municipios':'tabela'));
+});
+$('btnTabela').onclick=()=>mostrar('tabela');
+$('btnMunicipios').onclick=()=>mostrar('municipios');
+$('btnExport').onclick=exportar;
+$('btnLimpar').onclick=()=>{
+  $('busca').value=''; $('fMunicipio').value=''; $('fCategoria').value='';
+  $('fSeveridade').value=''; $('fStatus').value='';
+  sortKey='offlineMin'; sortDir=-1; mostrar('tabela');
+};
+
+mostrar('tabela');
+</script>
+</body>
+</html>

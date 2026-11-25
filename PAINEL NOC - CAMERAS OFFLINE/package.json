@@ -1,0 +1,16 @@
+{
+  "name": "painel-noc-offline",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Painel NOC de câmeras offline com backend HTTP local sem dependências",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "test": "node --test backend/*.test.js",
+    "gerar": "node gerar-painel.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "ISC"
+}

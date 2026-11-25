@@ -174,6 +174,7 @@ function fmtMin(m){
   return (d?d+'d ':'')+(h?h+'h ':'')+(mm?mm+'min':'').trim() || '0min';
 }
 const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const norm = s => String(s??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/\s+/g,' ').trim();
 
 /* ---------- Cabeçalho / KPIs ---------- */
 document.getElementById('subtitulo').textContent =
@@ -251,7 +252,7 @@ const COLS = [
 ];
 
 function filtrar(){
-  const q = $('busca').value.trim().toLowerCase();
+  const q = norm($('busca').value);
   const fm=$('fMunicipio').value, fc=$('fCategoria').value, fs=$('fSeveridade').value, fst=$('fStatus').value;
   let out = data.filter(d=>{
     if(fst && d.status!==fst) return false;
@@ -259,7 +260,7 @@ function filtrar(){
     if(fc && d.categoria!==fc) return false;
     if(fs){ const s=sevDe(d); if(!s||s.key!==fs) return false; }
     if(q){
-      const hay=(d.id+' '+d.nome+' '+d.municipio+' '+d.responsaveis.join(' ')+' '+d.marcadores).toLowerCase();
+      const hay=norm([d.idTexto,d.nome,d.municipio,d.categoria,d.responsaveis.join(' '),d.marcadores].join(' '));
       if(!hay.includes(q)) return false;
     }
     return true;
@@ -288,7 +289,7 @@ function renderTabela(){
     const resp = d.responsaveis.length ? esc(d.responsaveis.join(' · ')) : '<span class="muted">— sem responsável —</span>';
     const tag = d.marcadores ? ` <span class="tag">${esc(d.marcadores)}</span>` : '';
     return `<tr>
-      <td class="num-cell muted">${d.id}</td>
+      <td class="num-cell muted">${esc(d.idTexto)}</td>
       <td class="nome">${esc(d.nome)}${tag}</td>
       <td>${esc(d.municipio)}</td>
       <td><span class="tag">${esc(d.categoria)}</span></td>
