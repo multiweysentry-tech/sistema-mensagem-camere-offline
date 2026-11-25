@@ -682,6 +682,7 @@ function view(){
  if(authRequired)return loginView();
  if(tab==="instances")return instancesView();
  if(tab==="diag")return diagView();
+  if(tab==="painelnoc")return painelnocView();
  const T=TABS.find(x=>x.k===tab),g=groups(tab),ks=Object.keys(g);
  if(tab==="whatsapp")return waView();
  if(tab==="templates")return tplView();
