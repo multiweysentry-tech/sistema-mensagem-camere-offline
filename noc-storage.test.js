@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { createApp } = require('./server');
-const { saveNocFile, getLatestNocFile, listNocFiles } = require('./lib/noc-storage');
+const { saveNocFile, getLatestNocFile, listNocFiles, deleteNocFiles } = require('./lib/noc-storage');
 
 const CSV = [
   'ID;Nome;Município;Status;Tempo offline;SLA total',
@@ -55,6 +55,19 @@ test('noc-storage persiste o CSV canônico e devolve o payload reconstruído', a
   const list = await listNocFiles(db, 'default');
   assert.equal(list.length, 1);
   assert.equal(list[0].conteudo, undefined, 'a listagem não devolve o CSV inteiro');
+
+  await assert.rejects(
+    () => saveNocFile({
+      db,
+      tenantId: 'default',
+      filename: 'quebrado.csv',
+      csvText: 'ID,Nome,Município,Status\r\n"1";"CAM 1";"Cuiabá";"Offline"'
+    }),
+    /CSV vazio|Colunas obrigatórias|inconsistente/
+  );
+
+  assert.equal(await deleteNocFiles(db, 'default'), 1);
+  assert.equal(await getLatestNocFile(db, 'default'), null);
 });
 
 test('rotas de armazenamento do Painel NOC gravam, listam e restauram o último arquivo', async t => {
@@ -81,4 +94,9 @@ test('rotas de armazenamento do Painel NOC gravam, listam e restauram o último 
   const invalid = await postJson(baseUrl, '/api/noc/arquivos', { csv: '' });
   assert.equal(invalid.status, 400);
   assert.equal(invalid.body.codigo, 'NOC_FILE_ERROR');
+
+  const deleted = await fetch(baseUrl + '/api/noc/arquivos', { method: 'DELETE' });
+  assert.equal(deleted.status, 200);
+  assert.equal((await deleted.json()).removidos, 1);
+  assert.deepEqual((await (await fetch(baseUrl + '/api/noc/arquivos')).json()).arquivos, []);
 });

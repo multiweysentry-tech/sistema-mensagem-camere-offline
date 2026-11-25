@@ -552,6 +552,17 @@ async function listNocFiles(tenantId = 'default', limit = 20) {
     .slice(0, Math.max(1, Math.min(Number(limit) || 20, 100)));
 }
 
+async function deleteNocFiles(tenantId = 'default') {
+  const t = tenant(tenantId);
+  let removidos = 0;
+  for (const [key, row] of state.nocFiles) {
+    if (row.tenant_id !== t) continue;
+    state.nocFiles.delete(key);
+    removidos++;
+  }
+  return removidos;
+}
+
 module.exports = {
   mode,
   init,
@@ -559,6 +570,7 @@ module.exports = {
   saveNocFile,
   getLatestNocFile,
   listNocFiles,
+  deleteNocFiles,
   getCameras,
   upsertCamera,
   updateCamera,

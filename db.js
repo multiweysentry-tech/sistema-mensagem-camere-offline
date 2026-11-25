@@ -682,9 +682,14 @@ async function listNocFiles(tenantId = 'default', limit = 20) {
   return r.rows;
 }
 
+async function deleteNocFiles(tenantId = 'default') {
+  const r = await pool.query('DELETE FROM noc_arquivos WHERE tenant_id=$1', [tenant(tenantId)]);
+  return r.rowCount || 0;
+}
+
 module.exports = {
   pool, init, scopedKey,
-  saveNocFile, getLatestNocFile, listNocFiles,
+  saveNocFile, getLatestNocFile, listNocFiles, deleteNocFiles,
   registerDelivery, updateDeliveryStatus, getDeliveries, findDeliveryByExternalId,
   getCameras, upsertCamera, updateCamera, deleteCamera,
   addLog, getLog, hasRecentLog,

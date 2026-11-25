@@ -722,6 +722,15 @@ function createApp(options = {}) {
     }
   });
 
+  app.delete('/api/noc/arquivos', async (req, res) => {
+    try {
+      const removidos = await nocStorage.deleteNocFiles(db, req.tenantId || 'default');
+      return res.json({ ok: true, removidos });
+    } catch (error) {
+      return res.status(500).json({ codigo: 'NOC_FILE_ERROR', erro: error.message });
+    }
+  });
+
   // --- Importação NOC (CSV exportado do sistema de câmeras) ---
   app.get('/api/import/noc/status', async (req, res) => {
     try {
