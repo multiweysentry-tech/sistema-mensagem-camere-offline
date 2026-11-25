@@ -140,12 +140,7 @@ test('Vercel Meta provider uses approved templates and reports pending delivery'
   rejectTemplate = false;
   const accepted = await requestJson(port, '/api/whatsapp/send-options', {
     to: '5511999990003',
-    text: 'Câmera offline:\n• CAM-1',
-    buttons: [
-      { id: '1', text: 'Estou verificando' },
-      { id: '2', text: 'Preciso de suporte' },
-      { id: '3', text: 'Já resolvi' }
-    ]
+    text: 'Câmera offline:\n• CAM-1'
   });
   assert.equal(accepted.status, 202);
   assert.equal(accepted.body.deliveryStatus, 'pendente');
@@ -183,6 +178,56 @@ test('Vercel Meta provider uses approved templates and reports pending delivery'
   assert.equal(JSON.parse(callback.text).ok, true);
   const deliveries = await requestJson(port, '/api/whatsapp/delivery');
   assert.equal(deliveries.body.entregas[0].status, 'entregue');
+});
+
+test('Vercel send-options defaults to standard buttons and reports missing WhatsApp configuration', async t => {
+  const environmentKeys = [
+    'VERCEL', 'API_KEY', 'DATABASE_URL', 'POSTGRES_URL', 'PG_HOST', 'PG_PASSWORD',
+    'WHATSAPP_PROVIDER', 'WHATSAPP_BRIDGE_URL', 'WA_SERVER_URL', 'WA_API_KEY',
+    'META_WA_ACCESS_TOKEN', 'META_WA_PHONE_NUMBER_ID', 'META_WA_APP_SECRET',
+    'META_WA_VERIFY_TOKEN', 'DATAFY_WA_ACCESS_TOKEN', 'DATAFY_WA_WEBHOOK_SECRET'
+  ];
+  const previousEnvironment = new Map(environmentKeys.map(key => [key, process.env[key]]));
+  process.env.VERCEL = '1';
+  process.env.API_KEY = '';
+  process.env.DATABASE_URL = '';
+  process.env.POSTGRES_URL = '';
+  process.env.PG_HOST = '127.0.0.1';
+  process.env.PG_PASSWORD = '';
+  process.env.WHATSAPP_PROVIDER = '';
+  process.env.WHATSAPP_BRIDGE_URL = '';
+  process.env.WA_SERVER_URL = '';
+  process.env.WA_API_KEY = '';
+  for (const key of environmentKeys.slice(10)) process.env[key] = '';
+
+  const handlerPath = require.resolve('./api/index');
+  delete require.cache[handlerPath];
+  const handler = require('./api/index');
+  const server = http.createServer((request, response) => handler(request, response));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    delete require.cache[handlerPath];
+    for (const [key, value] of previousEnvironment) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const port = server.address().port;
+  const consent = await requestJson(port, '/api/consent', {
+    phone: '5511999990004',
+    opted_in: true
+  });
+  assert.equal(consent.status, 200);
+
+  const result = await requestJson(port, '/api/whatsapp/send-options', {
+    to: '5511999990004',
+    text: 'Câmera offline:\n• CAM-1'
+  });
+  assert.equal(result.status, 503);
+  assert.equal(result.body.codigo, 'WHATSAPP_SEND_FAILED');
+  assert.match(result.body.erro, /A Vercel não mantém uma sessão WhatsApp via QR/);
 });
 
 test('Vercel Datafy provider resolves its number id and registers the signed webhook', async t => {

@@ -43,3 +43,11 @@ test('painel não oferece ações locais de QR para servidor WhatsApp remoto', (
   assert.match(html, /waState\.remote\?"":status==="open"/);
   assert.match(html, /endpoint protegido <code>\/qr<\/code>/);
 });
+
+test('painel não afirma que mensagens sem WhatsApp configurado serão enfileiradas', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+
+  assert.match(html, /waState\.status==="unsupported"/);
+  assert.match(html, /WhatsApp não configurado neste painel · mensagens não serão enviadas/);
+  assert.doesNotMatch(html, /alertas ficarão na fila, sem envio/);
+});

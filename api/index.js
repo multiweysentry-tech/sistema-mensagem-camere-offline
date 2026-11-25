@@ -10,6 +10,7 @@ let loadError = null;
 const { isRemote: hasRemotePostgres } = require('../db-config');
 
 const { normalizarContato } = require('../phone-utils');
+const { OPTION_BUTTONS } = require('../wa-options');
 const whatsappRemoto = require('../lib/whatsapp');
 const { createMetaWhatsapp } = require('../lib/meta-whatsapp');
 const { createDatafyWhatsapp } = require('../lib/datafy-whatsapp');
@@ -125,7 +126,9 @@ try {
     sendButtons: async (to, text, buttons, footer, metadata) => {
       const digits = normalizePhone(to);
       if (!/^\d{10,15}$/.test(digits)) throw new Error('Telefone de destino inválido');
-      const options = Array.isArray(buttons) ? buttons.slice(0, 3) : [];
+      const options = buttons === undefined
+        ? OPTION_BUTTONS
+        : Array.isArray(buttons) ? buttons.slice(0, 3) : [];
       if (options.length < 2) throw new Error('Informe ao menos duas opções clicáveis');
 
       if (activeBridgeUrl) {
