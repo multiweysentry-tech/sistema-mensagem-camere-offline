@@ -852,6 +852,7 @@ let cams=[],phones={},tab="dash",fv={r:"",p:""},pend=[],storageMode="";
 let loadError="";
 let nocPainelItens=[];
 let nocPainelMontadoEm=0;
+let nocEditState=null;
 window.__nocStorageEndpoint="/api/noc/arquivos";
 let currentUser=null,authRequired=false,authError="";
 let instances=[],currentInstance="default",diagData=null;
@@ -1001,7 +1002,64 @@ const A={
  async resend(r){try{showSendResult(await sendGroupMessage(r),"WhatsApp reenviado")}catch(e){showSendError(e)}},
  async reopen(r){try{await persistGroupStatus(r,"Pendente",["resolvido"]);toast("Câmera reaberta")}catch(e){toast(`Falha: ${e.message}`)}},
  async chat(r){const key=phoneKey(phones[r]);if(!key)return toast("Responsável sem telefone cadastrado");const phone=PU.normalizarContato(phones[r]);const conversation=waConversations.find(item=>phoneKey(item.jid)===key);const jid=conversation?.jid||`${phone}@s.whatsapp.net`;await loadMessages(jid);go("whatsapp")},
- async done(r){try{await persistGroupStatus(r,"Resolvido",["aguardando"]);toast("Atendimento encerrado")}catch(e){toast(`Falha: ${e.message}`)}}
+ editgroup(r){
+  const grupo=groups("offline")[r]||[];
+  const nome=(grupo.find(c=>c.responsavel_nome&&c.responsavel_nome!=="Sem responsável informado")?.responsavel_nome)||"";
+  nocEditState={responsavel:r,nome,telefone:phones[r]||grupo[0]?.responsavel_telefone||"",novos:[]};
+  draw();
+ },
+ geaddid(){
+   const st=nocEditState;if(!st)return;
+   const el=document.getElementById("ge-id");
+   const ids=(el?.value||"").split(/[,;\s]+/).map(x=>x.trim().toUpperCase()).filter(Boolean);
+   const grupo=groups("offline")[st.responsavel]||[];
+   for(const id of ids)if(!grupo.some(c=>c.id===id)&&!st.novos.includes(id))st.novos.push(id);
+   draw();
+  },
+  geremoveid(id){if(!nocEditState)return;nocEditState.novos=(nocEditState.novos||[]).filter(x=>x!==id);draw()},
+  gecancel(){nocEditState=null;draw()},
+  async gesave(){
+   const st=nocEditState;if(!st)return false;
+   const nome=String(st.nome||"").trim()||"Sem responsável informado";
+   const raw=String(st.telefone||"").trim();
+   let telefone="";
+   if(raw){
+    const check=PU.normalizarTelefone(raw);
+    if(!check.valido){toast("Telefone inválido. Use DDI + DDD + número (ex.: 55 65 99999-0000).");return false}
+    telefone=PU.normalizarContato(raw);
+   }
+   const grupo=groups("offline")[st.responsavel]||[];
+   const existentes=grupo.map(c=>c.id);
+   const novos=(st.novos||[]).filter(id=>!existentes.includes(id));
+   if(!existentes.length&&!novos.length){toast("Adicione ao menos um ID de câmera");return false}
+   if(novos.length&&!telefone){toast("Informe o WhatsApp para adicionar novas câmeras");return false}
+   const fields={responsavel_nome:nome};
+   if(telefone)fields.responsavel_telefone=telefone;
+   try{
+    if(existentes.length)await apiRequest("/api/cameras/bulk",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids:existentes,fields})});
+    for(const id of novos){
+     const atual=cams.find(c=>c.id===id);
+     if(atual){
+      await apiRequest(`/api/cameras/${encodeURIComponent(id)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(fields)});
+     }else{
+      await apiRequest("/api/cameras",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,camera_nome:id,local:"",responsavel_nome:nome,responsavel_telefone:telefone,email:"",status:"Pendente",tentativas:0,ultima_cobranca:"",data_resolucao:"",observacoes:""})});
+     }
+    }
+    await loadFromApi();
+    nocEditState={responsavel:nome,nome:nome==="Sem responsável informado"?"":nome,telefone:raw,novos:[]};
+    draw();
+    toast(`Responsável ${nome} salvo com ${existentes.length+novos.length} câmera(s).`);
+    return true;
+   }catch(e){toast(`Falha ao salvar: ${e.message}`);return false}
+  },
+  async gesend(){
+   if(!nocEditState)return;
+   if(!await A.gesave())return;
+   const nome=nocEditState.responsavel;
+   if(!PU.normalizarTelefone(nocEditState.telefone).valido)return toast("Informe um WhatsApp válido antes de enviar.");
+   try{showSendResult(await sendGroupMessage(nome),`WhatsApp enviado para ${nome}`)}catch(e){showSendError(e)}
+  },
+  async done(r){try{await persistGroupStatus(r,"Resolvido",["aguardando"]);toast("Atendimento encerrado")}catch(e){toast(`Falha: ${e.message}`)}}
 };
 const cleanText=value=>String(value??"")
  .replace(/C�mara/gi,"Câmara")
@@ -1022,7 +1080,7 @@ function card(st,r,list){
  const entrega=deliveryBadge(list);
  const ids=list.map(c=>`<span class="chip">${esc(c.camera_nome||c.id)}</span>`).join("");
  let head=`<div class="gh"><b>${esc(r)}</b><span>${esc(phones[r])} · ${list.length} ${list.length>1?"câmeras":"câmera"}</span></div><div class="chips">${ids}</div>`,body="";
- if(st==="offline"){const old=Math.min(...list.map(c=>c.since)),recent=list.some(hasRecentAttempt);body=`<div class="act"><span class="tag r">offline ${ago(old).replace("há ","há ")}</span>${recent?`<span class="tag a">tentativa recente; verifique antes de reenviar</span>`:btn("p s","send",r,"Enviar WhatsApp")}${btn("s","more",r,"+ Câmera")}</div>`}
+ if(st==="offline"){const old=Math.min(...list.map(c=>c.since)),recent=list.some(hasRecentAttempt);body=`<div class="act"><span class="tag r">offline ${ago(old).replace("há ","há ")}</span>${recent?`<span class="tag a">tentativa recente; verifique antes de reenviar</span>`:btn("p s","send",r,"Enviar WhatsApp")}${btn("s","editgroup",r,"Editar")}${btn("s","more",r,"+ Câmera")}</div>${nocEditState&&nocEditState.responsavel===r?groupEditor(r,list):""}`}
  if(st==="notificado"){const rs=Math.max(...list.map(c=>c.resend));body=`<div class="act">${rs?`<span class="tag a">tentativa nº ${rs}</span>`:""}<span class="sim">Atualizar status:</span>${btn("s","ana",r,"EM ANÁLISE")}${btn("s","tec",r,"FALAR COM TÉCNICO")}${btn("s","ok",r,"INFORMOU RESOLUÇÃO")}</div>`}
  if(st==="analisando"){const d=Math.max(...list.map(c=>c.deadline)),l=left(d),rs=Math.max(...list.map(c=>c.resend));
   body=`<div class="act">${l?`<span class="tag b">faltam ${l}</span>`:`<span class="tag r">prazo vencido</span>${rs>=2?btn("s","tec",r,"Escalar ao técnico"):""}${btn("p s","resend",r,"Reenviar mensagem")}`}${btn("s","okAna",r,"Informou resolução")}</div>`}
@@ -1031,6 +1089,23 @@ function card(st,r,list){
  if(st==="resolvido"){const t=Math.max(...list.map(c=>c.doneAt)),dur=Math.round((t-Math.min(...list.map(c=>c.since)))/H);body=`<div class="act"><span class="tag g">resolvido ${ago(t)}</span><span class="sim">${dur} h até a solução</span>${btn("s","reopen",r,"Reabrir (Sentry ainda offline)")}</div>`}
    if(entrega&&["offline","notificado","analisando"].includes(st))body=`<div class="act"><span class="sim">entrega:</span>${entrega}</div>`+body;
   return `<div class="grp ${st}">${head}${body}</div>`
+}
+function groupEditor(r,list){
+ const st=nocEditState||{};
+ const novos=(st.novos||[]).map(id=>`<span class="chip">${esc(id)}<button class="x" data-a="geremoveid" data-r="${q(id)}" aria-label="Remover ${q(id)}">×</button></span>`).join("");
+ const atuais=list.slice(0,20).map(c=>esc(c.id)).join(", ")+(list.length>20?` … (+${list.length-20})`:"");
+ return `<div class="box" style="margin-top:10px">
+  <h2>Editar responsável</h2>
+  <label>Nome do responsável</label>
+  <input id="ge-nome" value="${q(st.nome||"")}" placeholder="Nome ou empresa" oninput="nocEditState.nome=this.value">
+  <label>WhatsApp (DDI + DDD)</label>
+  <input id="ge-tel" value="${q(st.telefone||"")}" placeholder="55 65 99999-0000" inputmode="numeric" oninput="nocEditState.telefone=this.value">
+  <label>Adicionar IDs de câmera</label>
+  <div class="send" style="margin-top:0"><input id="ge-id" placeholder="Digite o ID e tecle Enter" onkeydown="if(event.key==='Enter')A.geaddid()"><button class="btn" data-a="geaddid">Adicionar</button></div>
+  <div class="chips">${novos||`<span class="sim">${list.length} ID(s) já vinculados. Adicione novos IDs acima.</span>`}</div>
+  <p class="sub" style="padding:8px 0 0">IDs atuais: ${esc(atuais||"—")}</p>
+  <div class="act" style="margin-top:10px"><button class="btn p" data-a="gesave">Salvar alterações</button><button class="btn s" data-a="gesend">ENVIAR WHATSAPP</button><button class="btn" data-a="gecancel">Cancelar</button></div>
+ </div>`;
 }
 function preview(){
  const g=groups("offline"),r=Object.keys(g)[0]||"Mercado Boa Vista",l=(g[r]||[{id:"CAM-0412"},{id:"CAM-0413"}]).map(c=>"• "+(c.camera_nome||c.id)).join("\n");
@@ -1050,17 +1125,9 @@ function nocDraftView(){
  const isNoc=c=>/^NOC-/i.test(String(c.id||""));
  const drafts=cams.filter(c=>isNoc(c)&&!temContato(c));
  const ready=cams.filter(c=>isNoc(c)&&temContato(c));
- const rows=drafts.map(c=>`<tr>
-  <td><b>${esc(c.camera_nome||c.id)}</b><div class="sub" style="padding:0">${esc(c.id)} · ${esc(c.local||"—")}</div></td>
-  <td><input data-noc-id="${q(c.id)}" data-noc-field="responsavel_nome" value="${esc(c.responsavel_nome&&c.responsavel_nome!=="Sem responsável informado"?c.responsavel_nome:"")}" placeholder="Nome do responsável" style="width:150px"></td>
-  <td><input data-noc-id="${q(c.id)}" data-noc-field="responsavel_telefone" placeholder="55 65 99999-0000" inputmode="numeric" style="width:140px"></td>
-  <td><input data-noc-id="${q(c.id)}" data-noc-field="local" value="${esc(c.local||"")}" placeholder="Local" style="width:130px"></td>
-  <td><button class="btn s" data-a="savenoc" data-r="${q(c.id)}">Salvar</button></td>
- </tr>`).join("");
  return `<div class="box"><h2>Bot NOC → Offline</h2>
- <p class="sub" style="padding:0 0 10px">A relação de câmeras offline do Painel NOC vira rascunhos aqui. Cadastre responsável e WhatsApp no seu ritmo; o bot não envia mensagens.</p>
+ <p class="sub" style="padding:0 0 10px">A relação do Painel NOC aparece na lista ao lado, agrupada por responsável, no mesmo padrão das outras etapas. Use <b>Editar</b> em cada grupo para informar WhatsApp e vincular IDs; depois clique em <b>ENVIAR WHATSAPP</b>. O bot somente prepara os rascunhos.</p>
  <div class="act"><button class="btn p" data-a="nocbot">Importar/Atualizar rascunhos do Painel NOC</button><span class="tag a">${drafts.length} aguardando contato</span><span class="tag g">${ready.length} prontos</span></div>
- ${drafts.length?`<div style="overflow:auto;margin-top:10px"><table class="tbl" style="min-width:720px"><thead><tr><th>Câmera NOC</th><th>Responsável</th><th>WhatsApp</th><th>Local</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`:`<div class="empty" style="margin-top:10px">Nenhum rascunho NOC pendente. Use o botão acima para trazer a relação do Painel NOC.</div>`}
  </div>`;
 }
 async function runNocBot(){

@@ -88,6 +88,20 @@ async function upsertCamerasBulk(cameras = [], tenantId = 'default') {
   return gravadas;
 }
 
+async function updateCamerasBulk(ids = [], fields = {}, tenantId = 'default') {
+  let atualizadas = 0;
+  for (const id of ids || []) {
+    const key = scopedKey(id, tenantId);
+    const current = state.cameras.get(key);
+    if (!current || current.tenant_id !== tenant(tenantId)) continue;
+    for (const field of CAMERA_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(fields, field)) current[field] = fields[field];
+    }
+    atualizadas++;
+  }
+  return atualizadas;
+}
+
 async function updateCamera(id, fields, tenantId = 'default') {
   const current = state.cameras.get(scopedKey(id, tenantId));
   if (!current || current.tenant_id !== tenant(tenantId)) return;
@@ -584,6 +598,7 @@ module.exports = {
   upsertCamera,
   upsertCamerasBulk,
   updateCamera,
+  updateCamerasBulk,
   deleteCamera,
   addLog,
   getLog,

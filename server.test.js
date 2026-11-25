@@ -231,6 +231,41 @@ test('camera API validates, filters, updates, deletes, and reports missing recor
   assert.equal(missingUpdate.response.status, 404);
 });
 
+test('camera API atualiza um grupo inteiro em uma única chamada em lote', async t => {
+  const { baseUrl, db } = await startServer(t, [
+    camera,
+    { ...camera, id: 'CAM-9002', camera_nome: 'CAM-9002' }
+  ]);
+  let lotes = 0;
+  db.updateCamerasBulk = async (ids, fields) => {
+    lotes++;
+    for (const id of ids) await db.updateCamera(id, fields);
+    return ids.length;
+  };
+
+  const bulk = await jsonRequest(baseUrl, '/api/cameras/bulk', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ids: ['CAM-9001', 'CAM-9002'],
+      fields: { responsavel_nome: 'Nova equipe', responsavel_telefone: '5511888887777' }
+    })
+  });
+  assert.equal(bulk.response.status, 200);
+  assert.equal(bulk.body.atualizadas, 2);
+  assert.equal(lotes, 1);
+  assert.equal(db.cameras.every(item => item.responsavel_nome === 'Nova equipe'), true);
+  assert.equal(db.cameras.every(item => item.responsavel_telefone === '5511888887777'), true);
+
+  const invalido = await jsonRequest(baseUrl, '/api/cameras/bulk', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: ['CAM-9001'], fields: { responsavel_telefone: '123' } })
+  });
+  assert.equal(invalido.response.status, 400);
+  assert.equal(invalido.body.codigo, 'VALIDATION_ERROR');
+});
+
 test('POST camera remains an upsert and normalizes phone numbers', async t => {
   const { baseUrl } = await startServer(t);
   const first = await jsonRequest(baseUrl, '/api/cameras', {

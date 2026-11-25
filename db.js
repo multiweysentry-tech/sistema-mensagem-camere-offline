@@ -243,6 +243,24 @@ async function upsertCamerasBulk(cameras = [], tenantId = 'default') {
   return rows.length;
 }
 
+// Atualiza várias câmeras de um mesmo responsável em uma única consulta.
+async function updateCamerasBulk(ids = [], fields = {}, tenantId = 'default') {
+  if (!Array.isArray(ids) || !ids.length) return 0;
+  const allowed = new Set(['camera_nome','local','responsavel_nome','responsavel_telefone','email','status','tentativas','ultima_cobranca','data_resolucao','observacoes']);
+  const entries = Object.entries(fields || {}).filter(([key]) => allowed.has(key));
+  if (!entries.length) return 0;
+  const t = tenant(tenantId);
+  const scopedIds = [...new Set(ids.map(id => scopedKey(id, t)))];
+  const sets = entries.map(([key], index) => `${key}=$${index + 1}`).join(',');
+  const values = entries.map(([, value]) => value);
+  values.push(scopedIds, t);
+  const r = await pool.query(
+    `UPDATE cameras SET ${sets} WHERE id = ANY($${entries.length + 1}::text[]) AND tenant_id=$${entries.length + 2}`,
+    values
+  );
+  return r.rowCount || 0;
+}
+
 async function updateCamera(id, fields, tenantId = 'default') {
   const allowed = new Set(['camera_nome','local','responsavel_nome','responsavel_telefone','email','status','tentativas','ultima_cobranca','data_resolucao','observacoes']);
   const sets = []; const vals = []; let i = 1;
@@ -742,7 +760,7 @@ module.exports = {
   pool, init, scopedKey,
   saveNocFile, getLatestNocFile, listNocFiles, deleteNocFiles,
   registerDelivery, updateDeliveryStatus, getDeliveries, findDeliveryByExternalId,
-  getCameras, upsertCamera, upsertCamerasBulk, updateCamera, deleteCamera,
+  getCameras, upsertCamera, upsertCamerasBulk, updateCamera, updateCamerasBulk, deleteCamera,
   addLog, getLog, hasRecentLog,
   getConversations, upsertConversation, incrementUnread, getMessages, addMessage, markRead,
   isBlocked, hasConsent, getConsents, setConsent, ensureConsent, block, unblock, getBlocklist,

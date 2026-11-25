@@ -49,9 +49,14 @@ test('painel oferece bot NOC para transformar offline em rascunhos, sem envio au
 
   assert.match(html, /function nocDraftView\(\)/);
   assert.match(html, /data-a="nocbot"/);
-  assert.match(html, /data-a="savenoc"/);
+  assert.match(html, /btn\("s","editgroup"/);
+  assert.match(html, /editgroup\(r\)\{/);
+  assert.match(html, /if\(telefone\)fields\.responsavel_telefone=telefone/);
+  assert.match(html, /data-a="gesend"/);
+  assert.match(html, /ENVIAR WHATSAPP/);
   assert.match(html, /\/api\/bots\/noc\/run/);
   assert.match(html, /window\.addEventListener\("noc:offline"/);
+  assert.match(html, /O bot somente prepara os rascunhos/);
   assert.match(html, /Nenhuma mensagem enviada/);
 });
 

@@ -266,6 +266,36 @@ function createApp(options = {}) {
     }
   });
 
+  // Rota definida antes de /api/cameras/:id para não ser interpretada como ID.
+  app.put('/api/cameras/bulk', async (req, res) => {
+    const ids = Array.isArray(req.body?.ids)
+      ? [...new Set(req.body.ids.map(id => String(id || '').trim()).filter(Boolean))]
+      : [];
+    const fields = Object.fromEntries(
+      Object.entries(req.body?.fields || {}).filter(([key]) => CAMERA_FIELDS.has(key))
+    );
+    if (!ids.length) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe ao menos um ID de câmera' });
+    if (!Object.keys(fields).length) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe ao menos um campo para atualizar' });
+    if (Object.prototype.hasOwnProperty.call(fields, 'responsavel_telefone')) {
+      const telefone = String(fields.responsavel_telefone || '').trim();
+      if (telefone && !validCadastroPhone(telefone)) {
+        return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'responsavel_telefone invalido' });
+      }
+    }
+    try {
+      let atualizadas;
+      if (typeof db.updateCamerasBulk === 'function') {
+        atualizadas = await db.updateCamerasBulk(ids, fields, req.tenantId);
+      } else {
+        for (const id of ids) await db.updateCamera(id, fields, req.tenantId);
+        atualizadas = ids.length;
+      }
+      return res.json({ ok: true, atualizadas });
+    } catch (error) {
+      return res.status(500).json({ erro: error.message });
+    }
+  });
+
   app.get('/api/cameras/:id', async (req, res) => {
     try {
       const camera = (await db.getCameras(req.tenantId)).find(item => String(item.id) === req.params.id);
