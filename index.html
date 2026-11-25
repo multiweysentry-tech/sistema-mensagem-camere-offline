@@ -753,7 +753,7 @@ function csvParaArmazenamento(){
     (Number(d.sla24)||0)+'%',
     (Number(d.slaTotal)||0)+'%'
   ]);
-  return [COLUNAS_ARMAZENAMENTO, ...linhas.map(l=>l.map(citar).join(';'))].join('\r\n');
+  return [COLUNAS_ARMAZENAMENTO.join(';'), ...linhas.map(l=>l.map(citar).join(';'))].join('\r\n');
 }
 function prepararLeituraParaSalvar(nomeArquivo){
   leituraAtual = {

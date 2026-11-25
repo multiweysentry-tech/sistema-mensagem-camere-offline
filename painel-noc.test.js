@@ -31,6 +31,7 @@ test('leitura de dados do painel tem botão, regexes válidas e texto íntegro',
   assert.match(gerado, /async function salvarLeitura\(/);
   assert.match(gerado, /window\.addEventListener\('noc:payload'/);
   assert.match(gerado, /COLUNAS_ARMAZENAMENTO/);
+  assert.match(gerado, /\[COLUNAS_ARMAZENAMENTO\.join\(';'\)/, 'cabeçalho do CSV salvo precisa usar ;');
   assert.ok(gerado.includes('(\\d{1,2})[/-](\\d{1,2})'), 'regex de data perdeu \\d');
   assert.ok(gerado.includes('\\s*[|;/•·]\\s*'), 'separador de responsáveis perdeu \\s');
   assert.match(gerado, /XLSX\.read\(text, \{type:'string', FS: separador\}\)/, 'CSV não informa o separador ao XLSX');
