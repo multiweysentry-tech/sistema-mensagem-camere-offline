@@ -44,6 +44,17 @@ test('painel não oferece ações locais de QR para servidor WhatsApp remoto', (
   assert.match(html, /endpoint protegido <code>\/qr<\/code>/);
 });
 
+test('painel oferece bot NOC para transformar offline em rascunhos, sem envio automático', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+
+  assert.match(html, /function nocDraftView\(\)/);
+  assert.match(html, /data-a="nocbot"/);
+  assert.match(html, /data-a="savenoc"/);
+  assert.match(html, /\/api\/bots\/noc\/run/);
+  assert.match(html, /window\.addEventListener\("noc:offline"/);
+  assert.match(html, /Nenhuma mensagem enviada/);
+});
+
 test('painel não afirma que mensagens sem WhatsApp configurado serão enfileiradas', () => {
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
 

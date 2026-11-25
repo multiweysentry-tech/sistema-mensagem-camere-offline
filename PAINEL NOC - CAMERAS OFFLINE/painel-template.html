@@ -135,6 +135,7 @@
     <button class="btn active" id="btnTabela">📋 Tabela</button>
     <button class="btn" id="btnMunicipios">🏙️ Municípios</button>
     <button class="btn" id="btnLeitura">🤖 Leitura de dados</button>
+    <button class="btn" id="btnEnviarOffline">➡️ Enviar offline ao painel</button>
     <button class="btn" id="btnExport">⬇️ Exportar CSV</button>
     <button class="btn" id="btnLimpar">✖ Limpar</button>
     <span class="count-info" id="countInfo"></span>
@@ -439,6 +440,26 @@ $('btnMunicipios').onclick=()=>mostrar('municipios');
 function abrirLeitura(){ $('leituraModal').classList.remove('hidden'); }
 function fecharLeitura(){ $('leituraModal').classList.add('hidden'); }
 $('btnLeitura').onclick=abrirLeitura;
+function enviarOfflineParaApp(){
+  const linhas=(Array.isArray(data)?data:[]).filter(d=>d.status!=='Online').map(d=>({
+    id:d.idTexto||d.id,
+    nome:d.nome,
+    municipio:d.municipio,
+    responsaveis:Array.isArray(d.responsaveis)?d.responsaveis.join(' | '):(d.responsaveis||''),
+    marcadores:Array.isArray(d.marcadores)?d.marcadores.join(' | '):(d.marcadores||''),
+    status:d.status,
+    ultimo:d.ultimo,
+    tempo:d.offlineStr||'',
+    desc24:d.desc24,
+    sla24:d.sla24,
+    slaTotal:d.slaTotal
+  }));
+  window.dispatchEvent(new CustomEvent('noc:offline',{detail:{items:linhas}}));
+  const btn=$('btnEnviarOffline'), anterior=btn.textContent;
+  btn.textContent=`✅ ${linhas.length} enviadas`;
+  setTimeout(()=>{btn.textContent=anterior;},3000);
+}
+$('btnEnviarOffline').onclick=enviarOfflineParaApp;
 $('btnFecharLeitura').onclick=fecharLeitura;
 $('leituraModal').addEventListener('click',e=>{ if(e.target.id==='leituraModal') fecharLeitura(); });
 

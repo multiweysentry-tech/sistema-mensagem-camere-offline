@@ -257,6 +257,7 @@ svg text{fill:var(--mut);font-size:11px;font-family:inherit}
     <button class="btn active" id="btnTabela">📋 Tabela</button>
     <button class="btn" id="btnMunicipios">🏙️ Municípios</button>
     <button class="btn" id="btnLeitura">🤖 Leitura de dados</button>
+    <button class="btn" id="btnEnviarOffline">➡️ Enviar offline ao painel</button>
     <button class="btn" id="btnExport">⬇️ Exportar CSV</button>
     <button class="btn" id="btnLimpar">✖ Limpar</button>
     <span class="count-info" id="countInfo"></span>
@@ -561,6 +562,26 @@ $('btnMunicipios').onclick=()=>mostrar('municipios');
 function abrirLeitura(){ $('leituraModal').classList.remove('hidden'); }
 function fecharLeitura(){ $('leituraModal').classList.add('hidden'); }
 $('btnLeitura').onclick=abrirLeitura;
+function enviarOfflineParaApp(){
+  const linhas=(Array.isArray(data)?data:[]).filter(d=>d.status!=='Online').map(d=>({
+    id:d.idTexto||d.id,
+    nome:d.nome,
+    municipio:d.municipio,
+    responsaveis:Array.isArray(d.responsaveis)?d.responsaveis.join(' | '):(d.responsaveis||''),
+    marcadores:Array.isArray(d.marcadores)?d.marcadores.join(' | '):(d.marcadores||''),
+    status:d.status,
+    ultimo:d.ultimo,
+    tempo:d.offlineStr||'',
+    desc24:d.desc24,
+    sla24:d.sla24,
+    slaTotal:d.slaTotal
+  }));
+  window.dispatchEvent(new CustomEvent('noc:offline',{detail:{items:linhas}}));
+  const btn=$('btnEnviarOffline'), anterior=btn.textContent;
+  btn.textContent=`✅ ${linhas.length} enviadas`;
+  setTimeout(()=>{btn.textContent=anterior;},3000);
+}
+$('btnEnviarOffline').onclick=enviarOfflineParaApp;
 $('btnFecharLeitura').onclick=fecharLeitura;
 $('leituraModal').addEventListener('click',e=>{ if(e.target.id==='leituraModal') fecharLeitura(); });
 
@@ -738,6 +759,7 @@ const H=3600000,now=()=>Date.now();
 const sendsInProgress=new Set();
 let cams=[],phones={},tab="dash",fv={r:"",p:""},pend=[],storageMode="";
 let loadError="";
+let nocPainelItens=[];
 let currentUser=null,authRequired=false,authError="";
 let instances=[],currentInstance="default",diagData=null;
 let deliveries={},deliveryByCamera={},deliveryTimeout=15;
@@ -930,6 +952,54 @@ return `<div class="box"><h2>Cadastrar câmeras offline</h2>
 <div class="chips">${pend.length?pend.map(i=>`<span class="chip">${i}<button class="x" data-a="rmid" data-r="${q(i)}" aria-label="Remover ${i}">×</button></span>`).join(""):`<span class="sim">Adicione quantas câmeras precisar. Também dá para colar vários IDs de uma vez.</span>`}</div>
 <div class="act" style="margin-top:10px"><button class="btn p" data-a="cad">Cadastrar responsável e câmeras</button></div>
 <p class="sub" style="padding:10px 0 0">Se o responsável já existe, as câmeras entram no mesmo grupo.</p></div>`}
+function nocDraftView(){
+ const temContato=c=>PU.normalizarTelefone(c.responsavel_telefone).valido;
+ const isNoc=c=>/^NOC-/i.test(String(c.id||""));
+ const drafts=cams.filter(c=>isNoc(c)&&!temContato(c));
+ const ready=cams.filter(c=>isNoc(c)&&temContato(c));
+ const rows=drafts.map(c=>`<tr>
+  <td><b>${esc(c.camera_nome||c.id)}</b><div class="sub" style="padding:0">${esc(c.id)} · ${esc(c.local||"—")}</div></td>
+  <td><input data-noc-id="${q(c.id)}" data-noc-field="responsavel_nome" value="${esc(c.responsavel_nome&&c.responsavel_nome!=="Sem responsável informado"?c.responsavel_nome:"")}" placeholder="Nome do responsável" style="width:150px"></td>
+  <td><input data-noc-id="${q(c.id)}" data-noc-field="responsavel_telefone" placeholder="55 65 99999-0000" inputmode="numeric" style="width:140px"></td>
+  <td><input data-noc-id="${q(c.id)}" data-noc-field="local" value="${esc(c.local||"")}" placeholder="Local" style="width:130px"></td>
+  <td><button class="btn s" data-a="savenoc" data-r="${q(c.id)}">Salvar</button></td>
+ </tr>`).join("");
+ return `<div class="box"><h2>Bot NOC → Offline</h2>
+ <p class="sub" style="padding:0 0 10px">A relação de câmeras offline do Painel NOC vira rascunhos aqui. Cadastre responsável e WhatsApp no seu ritmo; o bot não envia mensagens.</p>
+ <div class="act"><button class="btn p" data-a="nocbot">Importar/Atualizar rascunhos do Painel NOC</button><span class="tag a">${drafts.length} aguardando contato</span><span class="tag g">${ready.length} prontos</span></div>
+ ${drafts.length?`<div style="overflow:auto;margin-top:10px"><table class="tbl" style="min-width:720px"><thead><tr><th>Câmera NOC</th><th>Responsável</th><th>WhatsApp</th><th>Local</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`:`<div class="empty" style="margin-top:10px">Nenhum rascunho NOC pendente. Use o botão acima para trazer a relação do Painel NOC.</div>`}
+ </div>`;
+}
+async function runNocBot(){
+ const btn=document.querySelector('[data-a="nocbot"]');
+ if(btn){btn.disabled=true;btn.textContent="Importando...";}
+ try{
+  const resp=await apiRequest("/api/bots/noc/run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(nocPainelItens.length?{items:nocPainelItens}:{})});
+  const r=resp.result||{};
+  toast(`Bot NOC: ${r.created||0} rascunho(s) criado(s), ${r.updated||0} atualizado(s), ${r.drafts||0} aguardando responsável/telefone. Nenhuma mensagem enviada.`,6000);
+  await loadFromApi();
+ }catch(e){toast(`Falha no bot NOC: ${e.message}`,6000);draw()}
+ finally{if(btn){btn.disabled=false;btn.textContent="Importar/Atualizar rascunhos do Painel NOC";}}
+}
+async function saveNocDraft(id){
+ const fields={};
+ document.querySelectorAll("[data-noc-id]").forEach(el=>{if(el.getAttribute("data-noc-id")===id)fields[el.getAttribute("data-noc-field")]=el.value.trim()});
+ const nome=fields.responsavel_nome||"";
+ if(!nome)return toast("Informe o nome do responsável antes de salvar");
+ const payload={responsavel_nome:nome};
+ if(fields.local)payload.local=fields.local;
+ const raw=fields.responsavel_telefone||"";
+ if(raw){
+  const check=PU.normalizarTelefone(raw);
+  if(!check.valido)return toast("Telefone inválido. Use DDI + DDD + número (ex.: 55 65 99999-0000).");
+  payload.responsavel_telefone=PU.normalizarContato(raw);
+ }
+ try{
+  await apiRequest(`/api/cameras/${encodeURIComponent(id)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+  toast(raw?`Contato salvo para ${nome}. Câmera pronta para o fluxo de envio.`:`Responsável salvo. Informe o WhatsApp quando obtiver o contato.`);
+  await loadFromApi();
+ }catch(e){toast(`Falha ao salvar: ${e.message}`)}
+}
 function loginView(){
  return `<div class="box" style="max-width:420px;margin:8vh auto">
   <h1>Acesso ao painel</h1>
@@ -1292,7 +1362,7 @@ function botCfgView(){
  return `<h1>Configuração dos Bots</h1><p class="lead">${T.d}</p>
  <div class="box" style="max-width:520px">
   <form id="botcfg-form">${inputs}</form>
-  <div class="act" style="margin-top:12px"><button class="btn p" onclick="saveBotCfg()">Salvar configuração</button><button class="btn" onclick="runBot('billing')">Executar cobrança</button><button class="btn" onclick="runBot('maintenance')">Executar lembrete</button></div>
+  <div class="act" style="margin-top:12px"><button class="btn p" onclick="saveBotCfg()">Salvar configuração</button><button class="btn" onclick="runBot('billing')">Executar cobrança</button><button class="btn" onclick="runBot('maintenance')">Executar lembrete</button><button class="btn" onclick="runNocBot()">Bot NOC → rascunhos</button></div>
   <p class="sub" style="padding:10px 0 0">Os bots leem essas configurações a cada execução.</p>
  </div><div class="box" style="max-width:520px;margin-top:16px"><h2>Consentimento para mensagens automáticas</h2>${contactList}</div>${pdfBox}`;
 }
@@ -1384,7 +1454,7 @@ function view(){
  if(tab==="dash"){ setTimeout(()=>{ fetch("/api/reports").then(r=>r.json()).then(d=>{ const el=document.getElementById("dash-extra"); if(el) el.innerHTML=`<div class="kpi"><b>${d.enviadasHoje||0}</b><span>msgs enviadas hoje</span></div><div class="kpi"><b>${d.recebidasHoje||0}</b><span>msgs recebidas hoje</span></div><div class="kpi"><b>${d.clientesAguardando||0}</b><span>clientes aguardando</span></div><div class="kpi"><b>${d.cobrancasEnviadas||0}</b><span>cobranças enviadas</span></div><div class="kpi"><b>${d.erros||0}</b><span>erros</span></div>`; }); },50); return dash(); }
  const kp=`<div class="kpis"><div class="kpi"><b>${cams.filter(c=>c.status!=="resolvido").length}</b><span>câmeras offline</span></div><div class="kpi"><b>${new Set(cams.filter(c=>c.status!=="resolvido").map(c=>c.resp)).size}</b><span>responsáveis</span></div><div class="kpi"><b>${cams.filter(c=>c.status==="resolvido").length}</b><span>resolvidas</span></div></div>`;
  let list=ks.length?ks.map(r=>card(tab,r,g[r])).join(""):`<div class="empty">Nada por aqui. ${tab==="offline"?"Cadastre uma câmera ao lado para começar.":"Quando houver movimento, os grupos aparecem nesta aba."}</div>`;
- const side=tab==="offline"?`<div>${form()}<div style="height:16px"></div>${preview()}</div>`:"";
+ const side=tab==="offline"?`<div>${form()}<div style="height:16px"></div>${nocDraftView()}<div style="height:16px"></div>${preview()}</div>`:"";
  return `<h1>${T.t}</h1><p class="lead">${T.d}</p>${tab==="offline"?healthBanner():""}${kp}${tab==="offline"?`<div class="two"><div>${list}</div>${side}</div>`:list}`
 }
 function dash(){
@@ -1428,6 +1498,10 @@ function applyHash(){
  if(TABS.some(t=>t.k===initial)){tab=initial;draw();}
 }
 window.addEventListener("hashchange",applyHash);
+window.addEventListener("noc:offline",e=>{
+ nocPainelItens=Array.isArray(e.detail?.items)?e.detail.items:[];
+ toast(`${nocPainelItens.length} câmera(s) offline do Painel NOC prontas para o bot. Abra a aba Offline e clique em Importar/Atualizar rascunhos.`,8000);
+});
 document.addEventListener("click",async e=>{
 const conversation=e.target.closest("[data-open-jid]");if(conversation)return loadMessages(conversation.dataset.openJid);
 const template=e.target.closest("[data-template-id]");if(template){tplActive=template.dataset.templateId;return draw()}
@@ -1437,7 +1511,9 @@ const removeTemplate=e.target.closest("[data-template-delete]");if(removeTemplat
  if(a==="addid"){pushIds();return focusId()}
  if(a==="rmid"){pend=pend.filter(x=>x!==r);draw();return focusId()}
  if(a==="more"){fv={r:r,p:phones[r]||""};go("offline");return focusId()}
- if(a==="cad"){pushIds();const r2=fv.r.trim(),p=fv.p.trim();
+ if(a==="nocbot")return runNocBot();
+ if(a==="savenoc")return saveNocDraft(r);
+  if(a==="cad"){pushIds();const r2=fv.r.trim(),p=fv.p.trim();
   if(!pend.length||!r2||!p)return toast("Informe o responsável, o WhatsApp e ao menos uma câmera");
   const novos=pend.filter(i=>!cams.some(c=>c.id===i&&c.status!=="resolvido"));
   if(!novos.length)return toast("Essas câmeras já estão cadastradas");

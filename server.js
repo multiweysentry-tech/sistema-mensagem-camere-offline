@@ -727,6 +727,80 @@ function createApp(options = {}) {
     }
   });
 
+  // --- Bot NOC: transforma a relação offline do Painel NOC em rascunhos na aba Offline ---
+  app.post('/api/import/noc/scan', async (req, res) => {
+    try {
+      const { runNocDraftBot } = require('./lib/noc-import');
+      const preparado = await runNocDraftBot({
+        db,
+        tenantId: req.tenantId || 'default',
+        options: { ...(req.body || {}), dryRun: true }
+      });
+      return res.json({
+        ok: true,
+        result: {
+          sourceFile: preparado.sourceFile,
+          assignments: preparado.assignments,
+          offline: preparado.offline,
+          drafts: preparado.drafts,
+          errors: preparado.errors
+        }
+      });
+    } catch (error) {
+      return res.status(400).json({ codigo: 'NOC_SCAN_ERROR', erro: error.message });
+    }
+  });
+
+  app.post('/api/import/noc/apply', async (req, res) => {
+    try {
+      const { applyNocAssignments } = require('./lib/noc-import');
+      const assignments = Array.isArray(req.body?.assignments) ? req.body.assignments : [];
+      if (!assignments.length) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Nenhuma atribuição NOC informada' });
+      const summary = await applyNocAssignments({
+        db,
+        tenantId: req.tenantId || 'default',
+        assignments,
+        dryRun: req.body?.dryRun === true
+      });
+      return res.json({ ok: true, summary });
+    } catch (error) {
+      return res.status(400).json({ codigo: 'NOC_APPLY_ERROR', erro: error.message });
+    }
+  });
+
+  app.post('/api/bots/noc/run', async (req, res) => {
+    try {
+      const tenantId = req.tenantId || 'default';
+      const { runNocDraftBot } = require('./lib/noc-import');
+      const prepared = await runNocDraftBot({ db, tenantId, options: req.body || {} });
+      const result = {
+        ...prepared,
+        created: prepared.sync.created,
+        updated: prepared.sync.updated,
+        unchanged: prepared.sync.unchanged,
+        semTelefone: prepared.sync.semTelefone,
+        sent: 0,
+        failed: 0,
+        unconfirmed: 0,
+        pending: prepared.drafts
+      };
+      await db.addLog({
+        timestamp: new Date().toISOString(),
+        camera_id: '',
+        camera_nome: prepared.sourceFile || 'NOC',
+        responsavel_telefone: '',
+        acao: 'BOT_NOC',
+        detalhe: `Rascunhos preparados: ${result.created} criadas, ${result.updated} atualizadas, ${prepared.drafts} aguardando responsável/telefone. Nenhuma mensagem enviada.`,
+        status_anterior: '',
+        status_novo: '',
+        trace_id: null
+      }, tenantId).catch(() => {});
+      return res.json({ ok: true, result });
+    } catch (error) {
+      return res.status(400).json({ codigo: 'NOC_BOT_ERROR', erro: error.message });
+    }
+  });
+
   // --- Importação PDF: varredura para destinar/atribuir câmeras ---
   app.post('/api/import/pdf/scan', express.json({ limit: '15mb' }), async (req, res) => {
     try {
@@ -1072,6 +1146,11 @@ if (require.main === module) {
   queue.register('run_maintenance', async payload => bots.runMaintenanceBot({
     force: true, tenantId: payload.tenantId || 'default', instanceId: payload.instanceId || 'default'
   }));
+  // Prepara apenas rascunhos; o envio continua no fluxo normal com consentimento/24 h.
+  queue.register('run_noc', async payload => {
+    const { runNocDraftBot } = require('./lib/noc-import');
+    return runNocDraftBot({ db, tenantId: payload.tenantId || 'default', options: payload.options || payload });
+  });
 
   process.on('unhandledRejection', reason => log('error', 'process.unhandled_rejection', { error: reason }));
   process.on('uncaughtException', error => {

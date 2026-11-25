@@ -24,6 +24,8 @@ test('template do painel é a fonte da versão gerada e do espelho', () => {
 
 test('leitura de dados do painel tem botão, regexes válidas e texto íntegro', () => {
   assert.match(gerado, /<button[^>]+id="btnLeitura"/);
+  assert.match(gerado, /<button[^>]+id="btnEnviarOffline"/);
+  assert.match(gerado, /new CustomEvent\('noc:offline'/);
   assert.match(gerado, /id="leituraModal"/);
   assert.ok(gerado.includes('(\\d{1,2})[/-](\\d{1,2})'), 'regex de data perdeu \\d');
   assert.ok(gerado.includes('\\s*[|;/•·]\\s*'), 'separador de responsáveis perdeu \\s');
