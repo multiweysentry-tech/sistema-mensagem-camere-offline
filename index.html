@@ -1684,7 +1684,7 @@ function carregarScriptNOC(src){
 async function restaurarUltimoArquivoNOC(montagem){
  try{
   const endpoint=window.__nocStorageEndpoint || "/api/noc/arquivos";
-  const response=await fetch(endpoint+"/ultimo",{credentials:"same-origin"});
+  const response=await fetch(endpoint+"/ultimo?t="+Date.now(),{cache:"no-store",credentials:"same-origin"});
   if(!response.ok)return;
   const json=await response.json();
   if(montagem!==nocPainelMontadoEm)return;
