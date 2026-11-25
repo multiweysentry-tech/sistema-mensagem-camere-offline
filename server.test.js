@@ -344,6 +344,63 @@ test('camera registration records consent but preserves an existing opt-out', as
   assert.equal(await db.isBlocked(camera.responsavel_telefone), true);
 });
 
+test('Datafy account endpoint checks the linked number without sending messages', async t => {
+  const db = createMemoryDb();
+  let accountChecks = 0;
+  const wa = {
+    provider: 'datafy',
+    remote: true,
+    webhookConfig: {
+      route: '/api/whatsapp/datafy/webhook',
+      secret: 'test-datafy-webhook-secret',
+      phoneNumberId: '1452138451316674',
+      tenantId: 'default'
+    },
+    setIO() {},
+    getStatus() {
+      return { status: 'configured', provider: 'datafy', remote: true, qr: null, phone: null, error: null };
+    },
+    async describeAccount() {
+      accountChecks++;
+      return {
+        clienteId: 'cli_1234',
+        phoneNumberId: '1452138451316674',
+        wabaId: '1400357781909099',
+        businessId: '3456789012345678',
+        configuredPhoneId: '1452138451316674',
+        phoneIdMatches: true,
+        checkedAt: '2026-11-25T20:00:00.000Z'
+      };
+    }
+  };
+  const bots = createBots({ db, wa, schedulerApi: { schedule: () => ({ stop() {} }) } });
+  const app = createApp({ db, wa, bots, apiKey: '' });
+  const server = app.listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => app.io.close(resolve)));
+
+  const result = await jsonRequest(`http://127.0.0.1:${server.address().port}`, '/api/whatsapp/account');
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.ok, true);
+  assert.equal(result.body.provider, 'datafy');
+  assert.equal(result.body.clienteId, '••••1234');
+  assert.equal(result.body.phoneNumberId, '••••6674');
+  assert.equal(result.body.wabaId, '••••9099');
+  assert.equal(result.body.businessId, '••••5678');
+  assert.equal(result.body.configuredPhoneId, '••••6674');
+  assert.equal(result.body.phoneIdMatches, true);
+  assert.equal(result.body.checkedAt, '2026-11-25T20:00:00.000Z');
+  assert.equal(accountChecks, 1);
+  assert.equal(db.sentMessages.length, 0);
+});
+
+test('Datafy account endpoint is unavailable for other WhatsApp providers', async t => {
+  const { baseUrl } = await startServer(t);
+  const result = await jsonRequest(baseUrl, '/api/whatsapp/account');
+  assert.equal(result.response.status, 400);
+  assert.equal(result.body.codigo, 'UNSUPPORTED_PROVIDER');
+});
+
 test('WhatsApp endpoints report connection failures and validate outbound messages', async t => {
   const { baseUrl, wa } = await startServer(t);
   const status = await jsonRequest(baseUrl, '/api/whatsapp/status');

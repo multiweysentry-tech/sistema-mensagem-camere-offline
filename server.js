@@ -428,6 +428,51 @@ function createApp(options = {}) {
     }
   });
 
+  function maskedId(value) {
+    const id = String(value || '').trim();
+    return id ? `••••${id.slice(-4)}` : null;
+  }
+
+  function safeUpstreamError(error) {
+    return String(error?.message || 'Falha ao consultar a conta Datafy')
+      .replace(/sk_live_[A-Za-z0-9_-]+/g, 'sk_live_***')
+      .slice(0, 300);
+  }
+
+  // Consulta somente leitura ao /me da Datafy: valida vínculo de número/token
+  // sem disparar mensagem real. Os IDs são devolvidos mascarados.
+  app.get('/api/whatsapp/account', async (req, res) => {
+    if (wa.provider !== 'datafy' || typeof wa.describeAccount !== 'function') {
+      return res.status(400).json({
+        codigo: 'UNSUPPORTED_PROVIDER',
+        erro: 'A consulta de conta esta disponivel apenas para WHATSAPP_PROVIDER=datafy'
+      });
+    }
+    try {
+      const conta = await wa.describeAccount();
+      return res.json({
+        ok: true,
+        provider: 'datafy',
+        clienteId: maskedId(conta.clienteId),
+        phoneNumberId: maskedId(conta.phoneNumberId),
+        wabaId: maskedId(conta.wabaId),
+        businessId: maskedId(conta.businessId),
+        configuredPhoneId: maskedId(conta.configuredPhoneId),
+        phoneIdMatches: conta.phoneIdMatches,
+        checkedAt: conta.checkedAt
+      });
+    } catch (error) {
+      return res.status(502).json({
+        ok: false,
+        provider: 'datafy',
+        codigo: 'DATAFY_ACCOUNT_CHECK_FAILED',
+        erro: safeUpstreamError(error),
+        httpStatus: error?.status || null,
+        datafyCode: error?.datafyCode || null
+      });
+    }
+  });
+
   // Status real de cada alerta. O timeout é calculado na leitura para funcionar
   // também no Vercel, onde não existe processo em background.
   app.get('/api/whatsapp/delivery', async (req, res) => {
