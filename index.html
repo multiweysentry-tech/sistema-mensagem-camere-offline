@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Painel de câmeras offline – Multiwey Sentry</title>
 <script>if(['127.0.0.1','localhost','::1'].includes(location.hostname))document.write('<script src="/socket.io/socket.io.js"><\/script>');</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
 <script src="/phone-utils.js"></script>
 <style>
 :root{--bg:#eef1ef;--panel:#fff;--ink:#17211f;--mut:#5d6b68;--line:#d5dcd9;--brand:#0f5c57;--brandfg:#fff;--red:#c8372d;--redbg:#fbe7e5;--amb:#9a6208;--ambbg:#fbf0d9;--blu:#245a9e;--blubg:#e3edf9;--grn:#26734d;--grnbg:#e0f2e8;--wa:#dcf8c6;--chat:#e9e4da;
@@ -19,6 +20,8 @@ button,input,textarea{font:inherit;color:inherit}
 aside{background:#031B34;border-right:1px solid var(--line);padding:20px 12px;position:sticky;top:0;align-self:start;height:100vh;color:#e6eeec}
 .logo{font-weight:600;font-size:16px;padding:0 10px 4px;color:#e6eeec}
 .sub{color:#98a9a5;font-size:13px;padding:0 10px 18px}
+.nav-label{display:flex;align-items:center;gap:10px}
+.nav-label .bi{font-size:15px;opacity:.9;min-width:16px;text-align:center}
 nav button{display:flex;width:100%;justify-content:space-between;align-items:center;gap:8px;background:none;border:0;border-left:3px solid transparent;padding:10px 10px;text-align:left;cursor:pointer;border-radius:0 6px 6px 0;color:#e6eeec}
 nav button:hover{background:rgba(255,255,255,.08)}
 nav button.on{border-left-color:var(--brand);background:rgba(255,255,255,.12);font-weight:600}
@@ -669,7 +672,7 @@ function painelnocView(){
  return `<h1>Painel NOC</h1><p class="lead">${esc(T?T.d:"Painel NOC de c?meras offline.")}</p>
  <div class="box" style="padding:0;overflow:hidden">
   <div class="act" style="padding:12px 14px;border-bottom:1px solid var(--line);justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-   <span class="sub" style="padding:0">Painel NOC incorporado ao sistema. Os arquivos ficam em <code>PAINEL NOC - CAMERAS OFFLINE/</code>.</span>
+   <span class="sub" style="padding:0">Painel NOC incorporado ao sistema. Os arquivos ficam em <code>painel-noc/</code>.</span>
    <a class="btn s" href="/painel-noc/" target="_blank" rel="noopener">Abrir em nova aba</a>
   </div>
   <iframe src="/painel-noc/" title="Painel NOC" style="width:100%;height:calc(100vh - 220px);min-height:640px;border:0;background:#fff"></iframe>
@@ -708,8 +711,8 @@ function pushIds(){const e=$("#f-id");if(!e)return;e.value.split(/[,;\s]+/).map(
 function focusId(){const e=$("#f-id");if(e)e.focus()}
 function draw(){
  if(authRequired){$("#nav").innerHTML="";$("#view").innerHTML=loginView();return}
- const ICONS={dash:"📊",offline:"⚠️",notificado:"🔔",analisando:"🔍",aguardando:"🛠️",validacao:"☑️",resolvido:"✅",whatsapp:"💬",instances:"📱",diag:"🩺",templates:"📝",reports:"📈",painelnoc:"??",botconfig:"??",blocklist:"🚫"};
- $("#nav").innerHTML=TABS.map(t=>`<button data-k="${t.k}" class="${t.k===tab?"on":""}"><span>${ICONS[t.k]||""} ${t.t}</span>${(t.k==="dash"||t.k==="painelnoc")?"":`<span class="n">${new Set(cams.filter(c=>c.status===t.k).map(c=>c.resp)).size}</span>`}</button>`).join("");
+ const ICONS={dash:"bi-grid-1x2-fill",offline:"bi-exclamation-triangle-fill",notificado:"bi-bell-fill",analisando:"bi-search",aguardando:"bi-tools",validacao:"bi-check2-square",resolvido:"bi-check-circle-fill",whatsapp:"bi-whatsapp",instances:"bi-phone-fill",diag:"bi-activity",templates:"bi-file-earmark-text",reports:"bi-bar-chart-fill",painelnoc:"bi-display",botconfig:"bi-gear-fill",blocklist:"bi-slash-circle"};
+ $("#nav").innerHTML=TABS.map(t=>`<button data-k="${t.k}" class="${t.k===tab?"on":""}"><span class="nav-label"><i class="bi ${ICONS[t.k]||'bi-circle'}"></i> ${t.t}</span>${(t.k==="dash"||t.k==="painelnoc")?"":`<span class="n">${new Set(cams.filter(c=>c.status===t.k).map(c=>c.resp)).size}</span>`}</button>`).join("");
  const keep=document.activeElement&&document.activeElement.id,val=keep&&document.activeElement.value;
  const storageNotice=storageMode==="memory"?'<div class="note">Armazenamento temporário em memória: configure o Postgres remoto para evitar perda de dados.</div>':"";
  $("#logout").style.display=currentUser?"block":"none";
