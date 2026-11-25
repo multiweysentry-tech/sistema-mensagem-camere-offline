@@ -1211,7 +1211,7 @@ function groupEditor(r,list){
 }
 function preview(){
  const g=groups("offline"),r=Object.keys(g)[0]||"Mercado Boa Vista",l=(g[r]||[{id:"CAM-0412"},{id:"CAM-0413"}]).map(c=>"• "+(c.camera_nome||c.id)).join("\n");
- return `<div class="box"><h2>Prévia da mensagem ao cliente</h2><div class="phone"><div class="bub">Olá, ${esc(g[r][0]?.nome||r)}.\nO Sentry identificou que estas câmeras estão offline:\n${esc(l)}\n\nComo prefere prosseguir? Toque em uma opção para atualizar o status.</div><div class="act" style="padding:8px 0 0"><span class="tag b">Estou verificando</span><span class="tag b">Preciso de suporte</span><span class="tag b">Já resolvi</span></div></div><p class="sub" style="padding:10px 0 0">Estas são as opções clicáveis que o cliente receberá no WhatsApp.</p></div>`
+ return `<div class="box"><h2>Prévia da mensagem ao cliente</h2><div class="phone"><div class="bub">Olá, ${esc(g[r]?.[0]?.nome||r)}.\nO Sentry identificou que estas câmeras estão offline:\n${esc(l)}\n\nComo prefere prosseguir? Toque em uma opção para atualizar o status.</div><div class="act" style="padding:8px 0 0"><span class="tag b">Estou verificando</span><span class="tag b">Preciso de suporte</span><span class="tag b">Já resolvi</span></div></div><p class="sub" style="padding:10px 0 0">Estas são as opções clicáveis que o cliente receberá no WhatsApp.</p></div>`
 }
 function form(){const rs=[...new Set(cams.map(respNome))].map(n=>`<option value="${q(n)}">`).join("");
 return `<div class="box"><h2>Cadastrar câmeras offline</h2>

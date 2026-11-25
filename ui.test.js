@@ -63,6 +63,11 @@ test('painel oferece bot NOC para transformar offline em rascunhos, sem envio au
   assert.match(html, /Nenhuma mensagem enviada/);
 });
 
+test('prévia da mensagem não quebra antes de carregar as câmeras', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  assert.match(html, /esc\(g\[r\]\?\.\[0\]\?\.nome\|\|r\)/);
+});
+
 test('painel limita campos vindos da API para não travar a interface', () => {
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
   assert.match(html, /const limitarTexto=/);
