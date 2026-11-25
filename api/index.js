@@ -83,6 +83,7 @@ try {
     provider: cloudWa?.provider,
     remote: Boolean(cloudWa),
     webhookConfig: cloudWa?.webhookConfig,
+    describeAccount: cloudWa?.describeAccount ? () => cloudWa.describeAccount() : undefined,
     setIO(socketServer) { cloudWa?.setIO(socketServer); },
     getStatus: () => cloudWa
       ? cloudWa.getStatus()

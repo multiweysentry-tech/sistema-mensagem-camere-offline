@@ -283,6 +283,15 @@ test('Vercel Datafy provider resolves its number id and registers the signed web
   assert.equal(requests[0].url, 'https://cloud.datafyapi.com.br/me');
   assert.equal(requests[0].options.headers.Authorization, 'Bearer test-datafy-token');
 
+  const account = await requestJson(server.address().port, '/api/whatsapp/account');
+  assert.equal(account.status, 200);
+  assert.equal(account.body.ok, true);
+  assert.equal(account.body.provider, 'datafy');
+  assert.match(account.body.phoneNumberId, /^••••/);
+  assert.equal(account.body.phoneIdMatches, null);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].url, 'https://cloud.datafyapi.com.br/me');
+
   const webhook = await requestRaw(server.address().port, '/api/whatsapp/datafy/webhook', {
     method: 'POST',
     headers: {
