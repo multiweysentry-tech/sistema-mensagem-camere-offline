@@ -273,6 +273,18 @@ async function updateCamera(id, fields, tenantId = 'default') {
   vals.push(scopedKey(id, tenantId), tenant(tenantId));
   await pool.query(`UPDATE cameras SET ${sets.join(',')} WHERE id=$${i} AND tenant_id=$${i + 1}`, vals);
 }
+// Exclui várias câmeras em uma única consulta, usada pelo editor do grupo.
+async function deleteCamerasBulk(ids = [], tenantId = 'default') {
+  if (!Array.isArray(ids) || !ids.length) return 0;
+  const t = tenant(tenantId);
+  const scopedIds = [...new Set(ids.map(id => scopedKey(id, t)))];
+  const r = await pool.query(
+    'DELETE FROM cameras WHERE id = ANY($1::text[]) AND tenant_id=$2',
+    [scopedIds, t]
+  );
+  return r.rowCount || 0;
+}
+
 async function deleteCamera(id, tenantId = 'default') {
   await pool.query('DELETE FROM cameras WHERE id=$1 AND tenant_id=$2', [scopedKey(id, tenantId), tenant(tenantId)]);
 }
@@ -760,7 +772,7 @@ module.exports = {
   pool, init, scopedKey,
   saveNocFile, getLatestNocFile, listNocFiles, deleteNocFiles,
   registerDelivery, updateDeliveryStatus, getDeliveries, findDeliveryByExternalId,
-  getCameras, upsertCamera, upsertCamerasBulk, updateCamera, updateCamerasBulk, deleteCamera,
+  getCameras, upsertCamera, upsertCamerasBulk, updateCamera, updateCamerasBulk, deleteCamera, deleteCamerasBulk,
   addLog, getLog, hasRecentLog,
   getConversations, upsertConversation, incrementUnread, getMessages, addMessage, markRead,
   isBlocked, hasConsent, getConsents, setConsent, ensureConsent, block, unblock, getBlocklist,

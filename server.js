@@ -296,6 +296,26 @@ function createApp(options = {}) {
     }
   });
 
+  // Exclusão em lote, antes de /api/cameras/:id para não ser tratada como ID.
+  app.delete('/api/cameras/bulk', async (req, res) => {
+    const ids = Array.isArray(req.body?.ids)
+      ? [...new Set(req.body.ids.map(id => String(id || '').trim()).filter(Boolean))]
+      : [];
+    if (!ids.length) return res.status(400).json({ codigo: 'VALIDATION_ERROR', erro: 'Informe ao menos um ID de câmera' });
+    try {
+      let excluidas;
+      if (typeof db.deleteCamerasBulk === 'function') {
+        excluidas = await db.deleteCamerasBulk(ids, req.tenantId);
+      } else {
+        for (const id of ids) await db.deleteCamera(id, req.tenantId);
+        excluidas = ids.length;
+      }
+      return res.json({ ok: true, excluidas });
+    } catch (error) {
+      return res.status(500).json({ erro: error.message });
+    }
+  });
+
   app.get('/api/cameras/:id', async (req, res) => {
     try {
       const camera = (await db.getCameras(req.tenantId)).find(item => String(item.id) === req.params.id);

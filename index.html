@@ -1005,7 +1005,7 @@ const A={
  editgroup(r){
   const grupo=groups("offline")[r]||[];
   const nome=(grupo.find(c=>c.responsavel_nome&&c.responsavel_nome!=="Sem responsável informado")?.responsavel_nome)||"";
-  nocEditState={responsavel:r,nome,telefone:phones[r]||grupo[0]?.responsavel_telefone||"",novos:[]};
+  nocEditState={responsavel:r,nome,telefone:phones[r]||grupo[0]?.responsavel_telefone||"",novos:[],remover:[]};
   draw();
  },
  geaddid(){
@@ -1013,10 +1013,25 @@ const A={
    const el=document.getElementById("ge-id");
    const ids=(el?.value||"").split(/[,;\s]+/).map(x=>x.trim().toUpperCase()).filter(Boolean);
    const grupo=groups("offline")[st.responsavel]||[];
-   for(const id of ids)if(!grupo.some(c=>c.id===id)&&!st.novos.includes(id))st.novos.push(id);
+   for(const id of ids){
+    st.remover=(st.remover||[]).filter(x=>x!==id);
+    if(!grupo.some(c=>c.id===id)&&!st.novos.includes(id))st.novos.push(id);
+   }
    draw();
   },
+  gedelid(id){if(!nocEditState)return;const a=nocEditState.remover||[];nocEditState.remover=a.includes(id)?a.filter(x=>x!==id):[...a,id];draw()},
+  geundelid(id){if(!nocEditState)return;nocEditState.remover=(nocEditState.remover||[]).filter(x=>x!==id);draw()},
   geremoveid(id){if(!nocEditState)return;nocEditState.novos=(nocEditState.novos||[]).filter(x=>x!==id);draw()},
+  async gedelgroup(){
+   const st=nocEditState;if(!st)return;
+   const ids=(groups("offline")[st.responsavel]||[]).map(c=>c.id);
+   if(!ids.length)return toast("Não há câmeras para excluir");
+   if(!confirm(`Excluir ${st.responsavel} e suas ${ids.length} câmera(s)? Essa ação não pode ser desfeita.`))return;
+   st.remover=ids;
+   if(!await A.gesave())return;
+   nocEditState=null;draw();
+   toast(`Responsável ${st.responsavel} excluído com ${ids.length} câmera(s).`);
+  },
   gecancel(){nocEditState=null;draw()},
   async gesave(){
    const st=nocEditState;if(!st)return false;
@@ -1030,13 +1045,15 @@ const A={
    }
    const grupo=groups("offline")[st.responsavel]||[];
    const existentes=grupo.map(c=>c.id);
-   const novos=(st.novos||[]).filter(id=>!existentes.includes(id));
+   const remover=(st.remover||[]).filter(id=>existentes.includes(id));
+   const novos=(st.novos||[]).filter(id=>!existentes.includes(id)&&!remover.includes(id));
    if(!existentes.length&&!novos.length){toast("Adicione ao menos um ID de câmera");return false}
    if(novos.length&&!telefone){toast("Informe o WhatsApp para adicionar novas câmeras");return false}
    const fields={responsavel_nome:nome};
    if(telefone)fields.responsavel_telefone=telefone;
    try{
-    if(existentes.length)await apiRequest("/api/cameras/bulk",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids:existentes,fields})});
+    const manter=existentes.filter(id=>!remover.includes(id));
+    if(manter.length)await apiRequest("/api/cameras/bulk",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids:manter,fields})});
     for(const id of novos){
      const atual=cams.find(c=>c.id===id);
      if(atual){
@@ -1045,17 +1062,20 @@ const A={
       await apiRequest("/api/cameras",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,camera_nome:id,local:"",responsavel_nome:nome,responsavel_telefone:telefone,email:"",status:"Pendente",tentativas:0,ultima_cobranca:"",data_resolucao:"",observacoes:""})});
      }
     }
+    if(remover.length)await apiRequest("/api/cameras/bulk",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids:remover})});
     await loadFromApi();
-    nocEditState={responsavel:nome,nome:nome==="Sem responsável informado"?"":nome,telefone:raw,novos:[]};
+    const total=manter.length+novos.length;
+    nocEditState=total?{responsavel:nome,nome:nome==="Sem responsável informado"?"":nome,telefone:raw,novos:[],remover:[]}:null;
     draw();
-    toast(`Responsável ${nome} salvo com ${existentes.length+novos.length} câmera(s).`);
+    toast(total?`Responsável ${nome} salvo com ${total} câmera(s).`:`Excluídas ${remover.length} câmera(s) de ${st.responsavel}.`);
     return true;
    }catch(e){toast(`Falha ao salvar: ${e.message}`);return false}
   },
   async gesend(){
    if(!nocEditState)return;
    if(!await A.gesave())return;
-   const nome=nocEditState.responsavel;
+   const nome=nocEditState?.responsavel;
+   if(!nome)return;
    if(!PU.normalizarTelefone(nocEditState.telefone).valido)return toast("Informe um WhatsApp válido antes de enviar.");
    try{showSendResult(await sendGroupMessage(nome),`WhatsApp enviado para ${nome}`)}catch(e){showSendError(e)}
   },
@@ -1092,19 +1112,25 @@ function card(st,r,list){
 }
 function groupEditor(r,list){
  const st=nocEditState||{};
+ const marcadas=st.remover||[];
  const novos=(st.novos||[]).map(id=>`<span class="chip">${esc(id)}<button class="x" data-a="geremoveid" data-r="${q(id)}" aria-label="Remover ${q(id)}">×</button></span>`).join("");
- const atuais=list.slice(0,20).map(c=>esc(c.id)).join(", ")+(list.length>20?` … (+${list.length-20})`:"");
+ const atuais=list.map(c=>{
+  const marcada=marcadas.includes(c.id);
+  return `<span class="chip"${marcada?' style="opacity:.6;text-decoration:line-through"':""}>${esc(c.id)}<button class="x" data-a="${marcada?"geundelid":"gedelid"}" data-r="${q(c.id)}" aria-label="${marcada?"Desfazer exclusão":"Excluir"} ${q(c.id)}">${marcada?"↺":"×"}</button></span>`;
+ }).join("")||`<span class="sim">Nenhum ID vinculado.</span>`;
  return `<div class="box" style="margin-top:10px">
   <h2>Editar responsável</h2>
   <label>Nome do responsável</label>
   <input id="ge-nome" value="${q(st.nome||"")}" placeholder="Nome ou empresa" oninput="nocEditState.nome=this.value">
   <label>WhatsApp (DDI + DDD)</label>
   <input id="ge-tel" value="${q(st.telefone||"")}" placeholder="55 65 99999-0000" inputmode="numeric" oninput="nocEditState.telefone=this.value">
+  <label>IDs vinculados (clique no × para excluir)</label>
+  <div class="chips" style="max-height:120px;overflow:auto">${atuais}</div>
+  ${marcadas.length?`<p class="sub" style="padding:8px 0 0">${marcadas.length} ID(s) marcado(s) para exclusão. Clique em Salvar alterações para confirmar.</p>`:""}
   <label>Adicionar IDs de câmera</label>
   <div class="send" style="margin-top:0"><input id="ge-id" placeholder="Digite o ID e tecle Enter" onkeydown="if(event.key==='Enter')A.geaddid()"><button class="btn" data-a="geaddid">Adicionar</button></div>
-  <div class="chips">${novos||`<span class="sim">${list.length} ID(s) já vinculados. Adicione novos IDs acima.</span>`}</div>
-  <p class="sub" style="padding:8px 0 0">IDs atuais: ${esc(atuais||"—")}</p>
-  <div class="act" style="margin-top:10px"><button class="btn p" data-a="gesave">Salvar alterações</button><button class="btn s" data-a="gesend">ENVIAR WHATSAPP</button><button class="btn" data-a="gecancel">Cancelar</button></div>
+  <div class="chips">${novos||`<span class="sim">Adicione novos IDs acima.</span>`}</div>
+  <div class="act" style="margin-top:10px"><button class="btn p" data-a="gesave">Salvar alterações</button><button class="btn s" data-a="gesend">ENVIAR WHATSAPP</button><button class="btn" data-a="gedelgroup">Excluir responsável</button><button class="btn" data-a="gecancel">Cancelar</button></div>
  </div>`;
 }
 function preview(){

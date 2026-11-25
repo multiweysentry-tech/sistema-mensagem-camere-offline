@@ -110,6 +110,18 @@ async function updateCamera(id, fields, tenantId = 'default') {
   }
 }
 
+async function deleteCamerasBulk(ids = [], tenantId = 'default') {
+  let excluidas = 0;
+  for (const id of ids || []) {
+    const key = scopedKey(id, tenantId);
+    const row = state.cameras.get(key);
+    if (!row || row.tenant_id !== tenant(tenantId)) continue;
+    state.cameras.delete(key);
+    excluidas++;
+  }
+  return excluidas;
+}
+
 async function deleteCamera(id, tenantId = 'default') {
   const key = scopedKey(id, tenantId);
   const row = state.cameras.get(key);
@@ -600,6 +612,7 @@ module.exports = {
   updateCamera,
   updateCamerasBulk,
   deleteCamera,
+  deleteCamerasBulk,
   addLog,
   getLog,
   hasRecentLog,

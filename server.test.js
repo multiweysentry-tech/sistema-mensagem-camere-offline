@@ -264,6 +264,22 @@ test('camera API atualiza um grupo inteiro em uma única chamada em lote', async
   });
   assert.equal(invalido.response.status, 400);
   assert.equal(invalido.body.codigo, 'VALIDATION_ERROR');
+
+  let lotesExclusao = 0;
+  db.deleteCamerasBulk = async ids => {
+    lotesExclusao++;
+    for (const id of ids) await db.deleteCamera(id);
+    return ids.length;
+  };
+  const excluidos = await jsonRequest(baseUrl, '/api/cameras/bulk', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: ['CAM-9001'] })
+  });
+  assert.equal(excluidos.response.status, 200);
+  assert.equal(excluidos.body.excluidas, 1);
+  assert.equal(lotesExclusao, 1);
+  assert.equal(db.cameras.some(item => item.id === 'CAM-9001'), false);
 });
 
 test('POST camera remains an upsert and normalizes phone numbers', async t => {
