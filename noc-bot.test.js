@@ -78,8 +78,8 @@ test('bot NOC cria rascunhos a partir da relação do Painel NOC sem enviar mens
   assert.equal(bot.body.result.created, 2);
   assert.equal(bot.body.result.drafts, 2);
   assert.equal(bot.body.result.sent, 0);
-  assert.equal(bot.body.result.assignments.length, 2);
   assert.equal(db.cameras.length, 2);
+  assert.equal(db.cameras[0].id, 'NOC-9001');
   assert.equal(db.cameras.every(camera => camera.responsavel_telefone === ''), true);
   assert.equal(db.logs.some(log => log.acao === 'BOT_NOC'), true);
 
@@ -102,7 +102,7 @@ test('scan NOC não grava e apply NOC cadastra contato sem disparar envio', asyn
 
   const bot = await jsonRequest(baseUrl, '/api/bots/noc/run', { csv });
   assert.equal(bot.body.result.created, 1);
-  const cameraId = bot.body.result.assignments[0].cameraId;
+  const cameraId = db.cameras[0].id;
 
   const apply = await jsonRequest(baseUrl, '/api/import/noc/apply', {
     assignments: [{

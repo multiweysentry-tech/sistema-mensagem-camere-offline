@@ -848,7 +848,6 @@ function createApp(options = {}) {
         errors: prepared.errors,
         finishedAt: prepared.finishedAt,
         sync,
-        assignments: prepared.assignments,
         sent: 0,
         failed: 0,
         unconfirmed: 0
