@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const noc = require('./noc-data');
+const appSync = require('./app-sync');
 
 const RAIZ = path.resolve(__dirname, '..');
 const cache = new Map();
@@ -78,6 +79,12 @@ function gerarArquivos(opcoes = {}) {
   saidas.push([caminho.organizado, noc.BOM + noc.csvOrganizado(payload)]);
   saidas.push([caminho.resumo, noc.BOM + noc.csvResumo(payload)]);
   saidas.push([caminho.index, html]);
+  // A geração real também atualiza a view nativa do sistema. Diretórios
+  // temporários dos testes não têm marcadores e são ignorados.
+  if (path.resolve(caminho.raiz) === RAIZ) {
+    const app = appSync.preparar({ raizPainel: caminho.raiz, htmlPainel: html });
+    if (app) saidas.push([app.arquivo, app.conteudo]);
+  }
   for (const [destino, conteudo] of saidas) escrever(destino, conteudo);
 
   const espelhos = [...(opcoes.espelharEm || []), ...raizesEspelho(caminho.raiz)];

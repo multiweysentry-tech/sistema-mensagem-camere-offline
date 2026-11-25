@@ -5,13 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Painel NOC — Câmeras Offline</title>
 <style>
-  :root{
+  :root,:host{
     --bg:#0b1120; --panel:#111a2e; --panel2:#0e1626; --border:#1e2a44;
     --text:#e2e8f0; --muted:#8ea0bd; --accent:#38bdf8;
     --green:#22c55e; --yellow:#eab308; --orange:#f97316; --red:#ef4444; --darkred:#b91c1c; --purple:#a855f7;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,-apple-system,sans-serif;font-size:14px}
+  body,:host{display:block;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,-apple-system,sans-serif;font-size:14px}
   .wrap{max-width:1500px;margin:0 auto;padding:20px}
   header{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px;margin-bottom:6px}
   header h1{font-size:22px;font-weight:700}
@@ -175,11 +175,16 @@ function fmtMin(m){
 }
 const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const norm = s => String(s??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/\s+/g,' ').trim();
+/* Quando embutido no sistema, os elementos vivem em um Shadow Root.
+   O escopo é capturado agora para que os handlers continuem funcionando
+   depois que o sistema remove a referência global temporária. */
+const __nocRoot = window.__nocRoot || document;
+const $ = id => __nocRoot.getElementById(id);
 
 /* ---------- Cabeçalho / KPIs ---------- */
-document.getElementById('subtitulo').textContent =
+$('subtitulo').textContent =
   `Fonte: ${stats.arquivoFonte} · Painel gerado em ${stats.geradoEm} · Dados 100% locais (funciona sem internet)`;
-document.getElementById('rodape').textContent =
+$('rodape').textContent =
   `Painel NOC local · ${stats.total} câmeras monitoradas em ${stats.municipios} municípios de Mato Grosso · Gerado em ${stats.geradoEm}`;
 
 const kpis = [
@@ -192,13 +197,13 @@ const kpis = [
   { v:stats.desc24Total.toLocaleString('pt-BR'), l:'Desconexões em 24h', c:'yellow' },
   { v:stats.slaMedio+'%',     l:'SLA médio (total)',      c:'blue' },
 ];
-document.getElementById('kpis').innerHTML = kpis.map(k=>
+$('kpis').innerHTML = kpis.map(k=>
   `<div class="kpi ${k.c}"><div class="v">${k.v}</div><div class="l">${k.l}</div></div>`).join('');
 
 /* ---------- Gráfico: municípios ---------- */
 const topMun = resumoMunicipios.filter(m=>m.offline>0).slice(0,12);
 const maxOff = Math.max(...topMun.map(m=>m.offline),1);
-document.getElementById('chartMunicipios').innerHTML = topMun.map(m=>
+$('chartMunicipios').innerHTML = topMun.map(m=>
   `<div class="bar-row" title="${esc(m.municipio)}: ${m.offline} offline de ${m.total}">
      <span class="name">${esc(m.municipio)}</span>
      <div class="bar-track"><div class="bar-fill" style="width:${(m.offline/maxOff*100).toFixed(1)}%"></div></div>
@@ -208,7 +213,7 @@ document.getElementById('chartMunicipios').innerHTML = topMun.map(m=>
 /* ---------- Gráfico: severidade ---------- */
 const sevCounts = SEVS.map(s=>({...s, n:data.filter(d=>{const x=sevDe(d);return x&&x.key===s.key;}).length}));
 const maxSev = Math.max(...sevCounts.map(s=>s.n),1);
-document.getElementById('chartSeveridade').innerHTML = sevCounts.map(s=>
+$('chartSeveridade').innerHTML = sevCounts.map(s=>
   `<div class="sev-row">
      <span><span class="sev" style="background:${s.color}">${s.label}</span></span>
      <div class="bar-track"><div class="bar-fill" style="width:${(s.n/maxSev*100).toFixed(1)}%;background:${s.color}"></div></div>
@@ -225,13 +230,12 @@ cats.forEach(([nome,n],i)=>{
   const c=catColors[i%catColors.length], from=acc/data.length*360; acc+=n;
   stops.push(`${c} ${from.toFixed(1)}deg ${(acc/data.length*360).toFixed(1)}deg`);
 });
-document.getElementById('donut').style.background = `conic-gradient(${stops.join(',')})`;
-document.getElementById('donutTotal').textContent = data.length;
-document.getElementById('legendCategorias').innerHTML = cats.map(([nome,n],i)=>
+$('donut').style.background = `conic-gradient(${stops.join(',')})`;
+$('donutTotal').textContent = data.length;
+$('legendCategorias').innerHTML = cats.map(([nome,n],i)=>
   `<div class="li"><span class="sw" style="background:${catColors[i%catColors.length]}"></span>${esc(nome)}<span class="cnt">${n}</span></div>`).join('');
 
 /* ---------- Filtros ---------- */
-const $ = id=>document.getElementById(id);
 const municipios = [...new Set(data.map(d=>d.municipio))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
 municipios.forEach(m=>$('fMunicipio').insertAdjacentHTML('beforeend',`<option>${esc(m)}</option>`));
 cats.forEach(([c])=>$('fCategoria').insertAdjacentHTML('beforeend',`<option>${esc(c)}</option>`));
