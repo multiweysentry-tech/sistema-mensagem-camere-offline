@@ -131,6 +131,9 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
     });
   }
 
+  // Agrupa pelo contato, nunca apenas pelo nome. Nomes repetidos com numeros
+  // diferentes viram usuarios separados; o mesmo numero com nomes diferentes
+  // continua sendo um unico destinatario, com todos os nomes registrados.
   function groupByPhone(cameras) {
     const groups = new Map();
     for (const camera of cameras) {
@@ -138,12 +141,15 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
       if (!/^\d{10,15}$/.test(phone)) continue;
       // 10 e 11 digitos (com/sem o 9º) viram o mesmo contato.
       const key = contactKey(camera.responsavel_telefone) || phone;
+      const nome = camera.responsavel_nome || '';
       const group = groups.get(key) || {
         key,
         phone,
-        name: camera.responsavel_nome || '',
+        name: nome,
+        names: [],
         cameras: []
       };
+      if (nome && !group.names.includes(nome)) group.names.push(nome);
       // Se um dos cadastros tem o 9º digito, preferimos esse numero para o envio.
       if (normalizarTelefone(camera.responsavel_telefone).nacional.length >
           normalizarTelefone(group.phone).nacional.length) {
@@ -461,7 +467,9 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
     runBillingBot,
     runMaintenanceBot,
     onIncomingMessage,
-    getSchedulerStatus
+    getSchedulerStatus,
+    groupByPhone,
+    groupByResponsible: groupByPhone
   };
 }
 

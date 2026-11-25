@@ -63,6 +63,15 @@ test('painel oferece bot NOC para transformar offline em rascunhos, sem envio au
   assert.match(html, /Nenhuma mensagem enviada/);
 });
 
+test('painel separa responsáveis com o mesmo nome por telefone', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  assert.match(html, /const respKeyFrom=/);
+  assert.match(html, /nome repetido · usuário separado/);
+  assert.match(html, /Nomes iguais com WhatsApp diferente viram usuários separados/);
+  assert.match(html, /nomesPorGrupo/);
+  assert.match(html, /Olá, \$\{group\[0\]\.nome\|\|resp\}/);
+});
+
 test('painel não afirma que mensagens sem WhatsApp configurado serão enfileiradas', () => {
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
 

@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { createApp } = require('./server');
-const { createBots, parseReply, localHour } = require('./bots');
+const { createBots, parseReply, localHour, groupByPhone } = require('./bots');
 const { extrairDDD } = require('./phone-utils');
 const { generateWAMessageFromContent, proto } = require('@whiskeysockets/baileys');
 const {
@@ -229,6 +229,23 @@ test('camera API validates, filters, updates, deletes, and reports missing recor
     body: JSON.stringify({ status: 'Resolvido' })
   });
   assert.equal(missingUpdate.response.status, 404);
+});
+
+test('bots separam nomes repetidos por telefone e mantêm um grupo por contato', () => {
+  const grupos = groupByPhone([
+    { id: 'A', responsavel_nome: 'Mercado', responsavel_telefone: '5565912345678', status: 'Pendente' },
+    { id: 'B', responsavel_nome: 'Mercado', responsavel_telefone: '5565888880002', status: 'Pendente' },
+    { id: 'C', responsavel_nome: 'Mercado', responsavel_telefone: '556512345678', status: 'Pendente' },
+    { id: 'D', responsavel_nome: 'Outro nome', responsavel_telefone: '5565912345678', status: 'Pendente' }
+  ]);
+
+  assert.equal(grupos.length, 2);
+  const primeiro = grupos.find(group => group.cameras.some(camera => camera.id === 'A'));
+  const segundo = grupos.find(group => group.cameras.some(camera => camera.id === 'B'));
+  assert.deepEqual(primeiro.cameras.map(camera => camera.id).sort(), ['A', 'C', 'D']);
+  assert.deepEqual([...primeiro.names].sort(), ['Mercado', 'Outro nome']);
+  assert.deepEqual(segundo.cameras.map(camera => camera.id), ['B']);
+  assert.deepEqual(segundo.names, ['Mercado']);
 });
 
 test('camera API atualiza um grupo inteiro em uma única chamada em lote', async t => {

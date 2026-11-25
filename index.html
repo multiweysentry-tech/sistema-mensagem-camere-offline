@@ -861,6 +861,14 @@ let deliveries={},deliveryByCamera={},deliveryTimeout=15;
 const PU=globalThis.PhoneUtils;
 function extrairDDD(entrada){return PU.extrairDDD(entrada)}
 function phoneKey(entrada){return PU.chaveComparacaoTelefone(entrada)||PU.normalizarContato(entrada)}
+// Identidade do responsável: o telefone manda, como nos bots. Nomes repetidos
+// com contatos diferentes viram usuários separados, cada um com seus IDs.
+const respNome=c=>String(c?.responsavel_nome||"").trim()||"Sem responsável informado";
+const respKeyFrom=(nome,telefone)=>{
+ const k=phoneKey(telefone);
+ return k?`tel::${k}`:`nome::${respNome({responsavel_nome:nome})}::sem-telefone`;
+};
+const respKey=c=>respKeyFrom(c.responsavel_nome,c.responsavel_telefone);
 async function checkWaNumber(phone){const normal=PU.normalizarTelefone(phone);if(!normal.valido)return {exists:false,error:"DDD invalido"};try{return await apiRequest("/api/whatsapp/check/"+encodeURIComponent(normal.internacional))}catch(e){return {exists:null,error:e.message}}}
 async function apiRequest(url,options={}){
  const response=await fetch(url,{credentials:"same-origin",...options});
@@ -906,9 +914,18 @@ async function loadFromApi(){
     const health=await apiRequest('/api/health');
     storageMode=health.storage||"postgres";
     const mapSt = { 'Pendente':'offline','Aguardando resposta':'notificado','Verificando':'analisando','Suporte':'aguardando','Aguardando validacao':'validacao','Resolvido':'resolvido',offline:'offline',notificado:'notificado',analisando:'analisando',aguardando:'aguardando',validacao:'validacao',resolvido:'resolvido' };
-    cams = data.map(c=>Object.assign({since:c.ultima_cobranca?Date.parse(c.ultima_cobranca)||Date.now():Date.now(),resend:Number(c.tentativas)||0,deadline:c.ultima_cobranca?(Date.parse(c.ultima_cobranca)||Date.now())+24*H:Date.now()+24*H,doneAt:c.data_resolucao?Date.parse(c.data_resolucao)||0:0},c,{resp:c.responsavel_nome||"Sem responsável",status:mapSt[c.status]||'offline'}));
+    cams = data.map(c=>Object.assign({since:c.ultima_cobranca?Date.parse(c.ultima_cobranca)||Date.now():Date.now(),resend:Number(c.tentativas)||0,deadline:c.ultima_cobranca?(Date.parse(c.ultima_cobranca)||Date.now())+24*H:Date.now()+24*H,doneAt:c.data_resolucao?Date.parse(c.data_resolucao)||0:0},c,{resp:respKey(c),nome:respNome(c),status:mapSt[c.status]||'offline'}));
     phones = {};
-    cams.forEach(c=>{ if(c.responsavel_nome && c.responsavel_telefone) phones[c.responsavel_nome]=c.responsavel_telefone; });
+    for(const c of cams){
+      if(!c.responsavel_telefone)continue;
+      const atual=phones[c.resp];
+      if(!atual||PU.normalizarTelefone(c.responsavel_telefone).nacional.length>PU.normalizarTelefone(atual).nacional.length)phones[c.resp]=c.responsavel_telefone;
+    }
+    const nomesPorGrupo=new Map();
+    for(const c of cams)if(!nomesPorGrupo.has(c.resp))nomesPorGrupo.set(c.resp,c.nome);
+    const contagemNomes={};
+    nomesPorGrupo.forEach(nome=>{contagemNomes[nome]=(contagemNomes[nome]||0)+1});
+    cams.forEach(c=>{c.nomeDuplicado=contagemNomes[c.nome]>1});
     loadError="";
   } catch(e){
     loadError=e.message;
@@ -967,7 +984,7 @@ async function sendGroupMessage(resp){
  const consent=await apiRequest(`/api/consent/${encodeURIComponent(phone)}`);
  if(!consent.opted_in)throw new Error("Este contato ainda não autorizou mensagens automáticas");
  const cameras=group.map(c=>`• ${c.camera_nome||c.id}`).join("\n");
- const text=`Olá, ${resp}!\nO Sentry identificou estas câmeras offline:\n${cameras}\n\nComo prefere prosseguir? Toque em uma opção abaixo para atualizar o status.`;
+ const text=`Olá, ${group[0].nome||resp}!\nO Sentry identificou estas câmeras offline:\n${cameras}\n\nComo prefere prosseguir? Toque em uma opção abaixo para atualizar o status.`;
  const result=await apiRequest("/api/whatsapp/send-options",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:phone,text,footer:"Escolha uma opção. PARAR encerra as mensagens.",instanceId:currentInstance,cameraIds:group.map(c=>c.id)})});
  const timestamp=new Date().toISOString();
  if(result.deliveryStatus==="pendente"){
@@ -993,7 +1010,7 @@ async function sendGroupMessage(resp){
  }
 }
 const A={
- async send(r){try{showSendResult(await sendGroupMessage(r),`WhatsApp enviado para ${r}`)}catch(e){showSendError(e)}},
+ async send(r){const nome=cams.find(c=>c.resp===r)?.nome||r;try{showSendResult(await sendGroupMessage(r),`WhatsApp enviado para ${nome}`)}catch(e){showSendError(e)}},
  async ana(r){try{await persistGroupStatus(r,"Verificando",["notificado"]);toast("Status atualizado")}catch(e){toast(`Falha: ${e.message}`)}},
  async tec(r){try{await persistGroupStatus(r,"Suporte",["notificado","analisando","validacao"]);toast("Encaminhado para suporte");go("aguardando")}catch(e){toast(`Falha: ${e.message}`)}},
  async ok(r){try{await persistGroupStatus(r,"Aguardando validacao",["notificado"]);toast("Aguardando validação")}catch(e){toast(`Falha: ${e.message}`)}},
@@ -1004,7 +1021,7 @@ const A={
  async chat(r){const key=phoneKey(phones[r]);if(!key)return toast("Responsável sem telefone cadastrado");const phone=PU.normalizarContato(phones[r]);const conversation=waConversations.find(item=>phoneKey(item.jid)===key);const jid=conversation?.jid||`${phone}@s.whatsapp.net`;await loadMessages(jid);go("whatsapp")},
  editgroup(r){
   const grupo=groups("offline")[r]||[];
-  const nome=(grupo.find(c=>c.responsavel_nome&&c.responsavel_nome!=="Sem responsável informado")?.responsavel_nome)||"";
+  const nome=(grupo.find(c=>c.responsavel_nome&&c.responsavel_nome!=="Sem responsável informado")?.nome)||"";
   nocEditState={responsavel:r,nome,telefone:phones[r]||grupo[0]?.responsavel_telefone||"",novos:[],remover:[]};
   draw();
  },
@@ -1024,13 +1041,15 @@ const A={
   geremoveid(id){if(!nocEditState)return;nocEditState.novos=(nocEditState.novos||[]).filter(x=>x!==id);draw()},
   async gedelgroup(){
    const st=nocEditState;if(!st)return;
-   const ids=(groups("offline")[st.responsavel]||[]).map(c=>c.id);
+   const grupo=groups("offline")[st.responsavel]||[];
+   const ids=grupo.map(c=>c.id);
+   const nome=grupo[0]?.nome||st.responsavel;
    if(!ids.length)return toast("Não há câmeras para excluir");
-   if(!confirm(`Excluir ${st.responsavel} e suas ${ids.length} câmera(s)? Essa ação não pode ser desfeita.`))return;
+   if(!confirm(`Excluir ${nome} e suas ${ids.length} câmera(s)? Essa ação não pode ser desfeita.`))return;
    st.remover=ids;
    if(!await A.gesave())return;
    nocEditState=null;draw();
-   toast(`Responsável ${st.responsavel} excluído com ${ids.length} câmera(s).`);
+   toast(`Responsável ${nome} excluído com ${ids.length} câmera(s).`);
   },
   gecancel(){nocEditState=null;draw()},
   async gesave(){
@@ -1065,7 +1084,7 @@ const A={
     if(remover.length)await apiRequest("/api/cameras/bulk",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids:remover})});
     await loadFromApi();
     const total=manter.length+novos.length;
-    nocEditState=total?{responsavel:nome,nome:nome==="Sem responsável informado"?"":nome,telefone:raw,novos:[],remover:[]}:null;
+    nocEditState=total?{responsavel:respKeyFrom(nome,telefone),nome:nome==="Sem responsável informado"?"":nome,telefone:raw,novos:[],remover:[]}:null;
     draw();
     toast(total?`Responsável ${nome} salvo com ${total} câmera(s).`:`Excluídas ${remover.length} câmera(s) de ${st.responsavel}.`);
     return true;
@@ -1099,7 +1118,8 @@ function btn(cls,a,r,t){return `<button class="btn ${cls}" data-a="${a}" data-r=
 function card(st,r,list){
  const entrega=deliveryBadge(list);
  const ids=list.map(c=>`<span class="chip">${esc(c.camera_nome||c.id)}</span>`).join("");
- let head=`<div class="gh"><b>${esc(r)}</b><span>${esc(phones[r])} · ${list.length} ${list.length>1?"câmeras":"câmera"}</span></div><div class="chips">${ids}</div>`,body="";
+ const nomeCartao=list[0]?.nome||r;
+ let head=`<div class="gh"><b>${esc(nomeCartao)}</b>${list[0]?.nomeDuplicado?`<span class="tag a">nome repetido · usuário separado</span>`:""}<span>${esc(phones[r]||"sem telefone")} · ${list.length} ${list.length>1?"câmeras":"câmera"}</span></div><div class="chips">${ids}</div>`,body="";
  if(st==="offline"){const old=Math.min(...list.map(c=>c.since)),recent=list.some(hasRecentAttempt);body=`<div class="act"><span class="tag r">offline ${ago(old).replace("há ","há ")}</span>${recent?`<span class="tag a">tentativa recente; verifique antes de reenviar</span>`:btn("p s","send",r,"Enviar WhatsApp")}${btn("s","editgroup",r,"Editar")}${btn("s","more",r,"+ Câmera")}</div>${nocEditState&&nocEditState.responsavel===r?groupEditor(r,list):""}`}
  if(st==="notificado"){const rs=Math.max(...list.map(c=>c.resend));body=`<div class="act">${rs?`<span class="tag a">tentativa nº ${rs}</span>`:""}<span class="sim">Atualizar status:</span>${btn("s","ana",r,"EM ANÁLISE")}${btn("s","tec",r,"FALAR COM TÉCNICO")}${btn("s","ok",r,"INFORMOU RESOLUÇÃO")}</div>`}
  if(st==="analisando"){const d=Math.max(...list.map(c=>c.deadline)),l=left(d),rs=Math.max(...list.map(c=>c.resend));
@@ -1135,9 +1155,9 @@ function groupEditor(r,list){
 }
 function preview(){
  const g=groups("offline"),r=Object.keys(g)[0]||"Mercado Boa Vista",l=(g[r]||[{id:"CAM-0412"},{id:"CAM-0413"}]).map(c=>"• "+(c.camera_nome||c.id)).join("\n");
- return `<div class="box"><h2>Prévia da mensagem ao cliente</h2><div class="phone"><div class="bub">Olá, ${esc(r)}.\nO Sentry identificou que estas câmeras estão offline:\n${esc(l)}\n\nComo prefere prosseguir? Toque em uma opção para atualizar o status.</div><div class="act" style="padding:8px 0 0"><span class="tag b">Estou verificando</span><span class="tag b">Preciso de suporte</span><span class="tag b">Já resolvi</span></div></div><p class="sub" style="padding:10px 0 0">Estas são as opções clicáveis que o cliente receberá no WhatsApp.</p></div>`
+ return `<div class="box"><h2>Prévia da mensagem ao cliente</h2><div class="phone"><div class="bub">Olá, ${esc(g[r][0]?.nome||r)}.\nO Sentry identificou que estas câmeras estão offline:\n${esc(l)}\n\nComo prefere prosseguir? Toque em uma opção para atualizar o status.</div><div class="act" style="padding:8px 0 0"><span class="tag b">Estou verificando</span><span class="tag b">Preciso de suporte</span><span class="tag b">Já resolvi</span></div></div><p class="sub" style="padding:10px 0 0">Estas são as opções clicáveis que o cliente receberá no WhatsApp.</p></div>`
 }
-function form(){const rs=Object.keys(phones).map(r=>`<option value="${q(r)}">`).join("");
+function form(){const rs=[...new Set(cams.map(respNome))].map(n=>`<option value="${q(n)}">`).join("");
 return `<div class="box"><h2>Cadastrar câmeras offline</h2>
 <label for="f-r">Responsável</label><input id="f-r" list="dl" value="${q(fv.r)}" placeholder="Nome ou empresa" autocomplete="off"><datalist id="dl">${rs}</datalist>
 <label for="f-p">WhatsApp (DDI + DDD)</label><input id="f-p" value="${q(fv.p)}" placeholder="55 65 99999-0000" inputmode="numeric">
@@ -1145,14 +1165,14 @@ return `<div class="box"><h2>Cadastrar câmeras offline</h2>
 <div class="send" style="margin-top:0"><input id="f-id" placeholder="Digite o ID e tecle Enter" autocomplete="off"><button class="btn" data-a="addid">Adicionar</button></div>
 <div class="chips">${pend.length?pend.map(i=>`<span class="chip">${i}<button class="x" data-a="rmid" data-r="${q(i)}" aria-label="Remover ${i}">×</button></span>`).join(""):`<span class="sim">Adicione quantas câmeras precisar. Também dá para colar vários IDs de uma vez.</span>`}</div>
 <div class="act" style="margin-top:10px"><button class="btn p" data-a="cad">Cadastrar responsável e câmeras</button></div>
-<p class="sub" style="padding:10px 0 0">Se o responsável já existe, as câmeras entram no mesmo grupo.</p></div>`}
+<p class="sub" style="padding:10px 0 0">Se o nome e o WhatsApp já existem, as câmeras entram no mesmo grupo. Nomes iguais com WhatsApp diferente viram usuários separados.</p></div>`}
 function nocDraftView(){
  const temContato=c=>PU.normalizarTelefone(c.responsavel_telefone).valido;
  const isNoc=c=>/^NOC-/i.test(String(c.id||""));
  const drafts=cams.filter(c=>isNoc(c)&&!temContato(c));
  const ready=cams.filter(c=>isNoc(c)&&temContato(c));
  return `<div class="box"><h2>Bot NOC → Offline</h2>
- <p class="sub" style="padding:0 0 10px">A relação do Painel NOC aparece na lista ao lado, agrupada por responsável, no mesmo padrão das outras etapas. Use <b>Editar</b> em cada grupo para informar WhatsApp e vincular IDs; depois clique em <b>ENVIAR WHATSAPP</b>. O bot somente prepara os rascunhos.</p>
+ <p class="sub" style="padding:0 0 10px">A relação do Painel NOC aparece na lista ao lado, agrupada por responsável, no mesmo padrão das outras etapas. Nomes repetidos são separados pelo WhatsApp de cada usuário, com os IDs vinculados a cada card. Use <b>Editar</b> para informar WhatsApp e vincular IDs; depois clique em <b>ENVIAR WHATSAPP</b>. O bot somente prepara os rascunhos.</p>
  <div class="act"><button class="btn p" data-a="nocbot">Importar/Atualizar rascunhos do Painel NOC</button><span class="tag a">${drafts.length} aguardando contato</span><span class="tag g">${ready.length} prontos</span></div>
  </div>`;
 }
@@ -1723,7 +1743,7 @@ const removeTemplate=e.target.closest("[data-template-delete]");if(removeTemplat
  if(A[a])A[a](r)
 });
 document.addEventListener("keydown",e=>{if(e.target.id==="f-id"&&(e.key==="Enter"||e.key===",")){e.preventDefault();pushIds();focusId()}});
-document.addEventListener("input",e=>{const t=e.target;if(t.id==="f-r"){fv.r=t.value;if(phones[t.value]){fv.p=phones[t.value];$("#f-p").value=fv.p}}if(t.id==="f-p")fv.p=t.value});
+document.addEventListener("input",e=>{const t=e.target;if(t.id==="f-r"){fv.r=t.value;const k=respKeyFrom(t.value,$("#f-p").value);if(phones[k]){fv.p=phones[k];$("#f-p").value=fv.p}}if(t.id==="f-p")fv.p=t.value});
 $("#theme").onclick=()=>{const d=document.documentElement,dark=getComputedStyle(d).colorScheme==="dark";d.dataset.theme=dark?"light":"dark"};
 $("#logout").onclick=doLogout;
 setInterval(()=>{if(tab==="analisando")draw()},60000);
