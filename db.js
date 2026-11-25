@@ -361,36 +361,113 @@ async function setBotConfig(key, value, tenantId = 'default') {
 }
 async function getReports(tenantId = 'default') {
   const t = tenant(tenantId);
-  const cameras = await pool.query('SELECT * FROM cameras WHERE tenant_id=$1', [t]);
-  const logs = await pool.query('SELECT * FROM log WHERE tenant_id=$1', [t]);
-  const counts = { Pendente:0, 'Aguardando resposta':0, Verificando:0, Suporte:0, 'Aguardando validacao':0, Resolvido:0 };
-  for (const c of cameras.rows) {
+  const [camerasR, logsR, msgsHojeR, clientesAguardandoR, entregasR] = await Promise.all([
+    pool.query('SELECT * FROM cameras WHERE tenant_id=$1', [t]),
+    pool.query('SELECT * FROM log WHERE tenant_id=$1', [t]),
+    pool.query(`SELECT direction, COUNT(*) as c FROM messages WHERE tenant_id=$1 AND time >= to_char((NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours', 'YYYY-MM-DD"T"HH24:MI:SS') GROUP BY direction`, [t]),
+    pool.query('SELECT COUNT(*) as c FROM conversations WHERE tenant_id=$1 AND unread > 0', [t]),
+    pool.query('SELECT status, COUNT(*) as c FROM message_delivery WHERE tenant_id=$1 GROUP BY status', [t]).catch(() => ({ rows: [] }))
+  ]);
+  const cameras = camerasR.rows;
+  const logs = logsR.rows.sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));
+  const counts = { Pendente: 0, 'Aguardando resposta': 0, Verificando: 0, Suporte: 0, 'Aguardando validacao': 0, Resolvido: 0 };
+  const porResponsavel = new Map();
+  const temposResolucao = [];
+  const agora = Date.now();
+
+  for (const c of cameras) {
     const st = String(c.status || '').trim();
     if (counts[st] !== undefined) counts[st] += 1;
+    const resp = String(c.responsavel_nome || 'Sem responsável').trim() || 'Sem responsável';
+    const item = porResponsavel.get(resp) || { responsavel: resp, telefone: c.responsavel_telefone || '', total: 0, abertas: 0, resolvidas: 0, atrasadas: 0 };
+    item.total += 1;
+    if (st === 'Resolvido') item.resolvidas += 1;
+    else {
+      item.abertas += 1;
+      const base = Date.parse(c.ultima_cobranca || '') || Date.parse(c.data_resolucao || '') || 0;
+      if (base && agora - base > 24 * 3600000) item.atrasadas += 1;
+    }
+    porResponsavel.set(resp, item);
+
+    if (st === 'Resolvido' && c.data_resolucao) {
+      const fim = Date.parse(c.data_resolucao);
+      const inicio = Date.parse(c.ultima_cobranca || '') || fim;
+      if (Number.isFinite(fim) && Number.isFinite(inicio) && fim >= inicio) temposResolucao.push(fim - inicio);
+    }
   }
-  const resolvidas = cameras.rows.filter(c => c.status === 'Resolvido' && c.data_resolucao);
-  const cobrancasEnviadas = logs.rows.filter(l => l.acao === 'COBRANCA_ENVIADA').length;
-  const erros = logs.rows.filter(l => l.acao === 'ERRO').length;
-  const escalonamentos = logs.rows.filter(l => l.acao === 'RESPOSTA_RECEBIDA' && l.status_novo === 'Suporte').length;
-  const today = new Date().toISOString().slice(0, 10);
-  const msgsHoje = await pool.query('SELECT direction, COUNT(*) as c FROM messages WHERE tenant_id=$1 AND time LIKE $2 GROUP BY direction', [t, `${today}%`]);
-  let enviadasHoje = 0, recebidasHoje = 0;
-  for (const r of msgsHoje.rows) {
+
+  const tempoMedioHoras = temposResolucao.length
+    ? Math.round((temposResolucao.reduce((a, b) => a + b, 0) / temposResolucao.length / 3600000) * 10) / 10
+    : null;
+  const tempoMaxHoras = temposResolucao.length ? Math.round((Math.max(...temposResolucao) / 3600000) * 10) / 10 : null;
+  const tempoMinHoras = temposResolucao.length ? Math.round((Math.min(...temposResolucao) / 3600000) * 10) / 10 : null;
+
+  const cobrancasEnviadas = logs.filter(l => l.acao === 'COBRANCA_ENVIADA').length;
+  const enviosSemConfirmacao = logs.filter(l => ['ENVIO_SEM_CONFIRMACAO', 'ENVIO_AGUARDANDO_CONFIRMACAO'].includes(l.acao)).length;
+  const erros = logs.filter(l => ['ERRO', 'ENVIO_FALHOU'].includes(l.acao)).length;
+  const escalonamentos = logs.filter(l => l.acao === 'ESCALONAMENTO' || (l.acao === 'RESPOSTA_RECEBIDA' && l.status_novo === 'Suporte')).length;
+  const respostasRecebidas = logs.filter(l => l.acao === 'RESPOSTA_RECEBIDA').length;
+
+  let enviadasHoje = 0; let recebidasHoje = 0;
+  for (const r of msgsHojeR.rows) {
     if (r.direction === 'out') enviadasHoje = Number(r.c);
     else recebidasHoje = Number(r.c);
   }
-  const clientesAguardando = await pool.query('SELECT COUNT(*) as c FROM conversations WHERE tenant_id=$1 AND unread > 0', [t]);
+
+  const entregas = { pendente: 0, enviada: 0, entregue: 0, lida: 0, falhou: 0 };
+  for (const r of entregasR.rows) {
+    const k = String(r.status || '');
+    if (entregas[k] !== undefined) entregas[k] = Number(r.c);
+  }
+
+  const responsaveisTop = [...porResponsavel.values()]
+    .sort((a, b) => b.abertas - a.abertas || b.total - a.total)
+    .slice(0, 10);
+
+  const atividadesRecentes = logs.slice(0, 15).map(l => ({
+    timestamp: l.timestamp,
+    acao: l.acao,
+    camera: l.camera_nome || l.camera_id || '',
+    responsavel: l.responsavel_telefone || '',
+    detalhe: l.detalhe || '',
+    anterior: l.status_anterior || '',
+    novo: l.status_novo || ''
+  }));
+
+  const camerasAbertasAntigas = cameras
+    .filter(c => c.status !== 'Resolvido')
+    .map(c => {
+      const base = Date.parse(c.ultima_cobranca || '') || 0;
+      return {
+        id: c.id,
+        nome: c.camera_nome || c.id,
+        responsavel: c.responsavel_nome || '',
+        status: c.status,
+        horasAberta: base ? Math.round(((agora - base) / 3600000) * 10) / 10 : null
+      };
+    })
+    .sort((a, b) => (b.horasAberta || 0) - (a.horasAberta || 0))
+    .slice(0, 10);
+
   return {
     counts,
-    total: cameras.rows.length,
-    tempoMedioHoras: null,
+    total: cameras.length,
+    tempoMedioHoras,
+    tempoMaxHoras,
+    tempoMinHoras,
     cobrancasEnviadas,
+    enviosSemConfirmacao,
     erros,
     escalonamentos,
-    resolvidas: resolvidas.length,
+    respostasRecebidas,
+    resolvidas: counts.Resolvido,
     enviadasHoje,
     recebidasHoje,
-    clientesAguardando: Number(clientesAguardando.rows[0].c)
+    clientesAguardando: Number(clientesAguardandoR.rows[0]?.c || 0),
+    entregas,
+    responsaveisTop,
+    atividadesRecentes,
+    camerasAbertasAntigas
   };
 }
 

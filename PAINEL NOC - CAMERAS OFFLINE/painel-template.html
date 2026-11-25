@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Painel NOC — Câmeras Offline</title>
 <style>
-  :root,:host{
+:root,:host{
     --bg:#0b1120; --panel:#111a2e; --panel2:#0e1626; --border:#1e2a44;
     --text:#e2e8f0; --muted:#8ea0bd; --accent:#38bdf8;
     --green:#22c55e; --yellow:#eab308; --orange:#f97316; --red:#ef4444; --darkred:#b91c1c; --purple:#a855f7;
@@ -83,7 +83,11 @@
   .mun-card .stats b{color:var(--text)}
   .mun-card .off b{color:var(--red)}
   footer{color:var(--muted);font-size:11.5px;text-align:center;margin:18px 0 6px}
-  .hidden{display:none!important}
+.modal-back{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;z-index:1000}
+.modal{background:var(--panel);border:1px solid var(--border);border-radius:12px;max-width:920px;width:100%;padding:16px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+.modal-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
+.modal-head h3{margin:0;font-size:16px}
+.hidden{display:none!important}
 </style>
 </head>
 <body>
@@ -130,12 +134,33 @@
     </select>
     <button class="btn active" id="btnTabela">📋 Tabela</button>
     <button class="btn" id="btnMunicipios">🏙️ Municípios</button>
+    <button class="btn" id="btnLeitura">🤖 Leitura de dados</button>
     <button class="btn" id="btnExport">⬇️ Exportar CSV</button>
     <button class="btn" id="btnLimpar">✖ Limpar</button>
     <span class="count-info" id="countInfo"></span>
   </div>
 
-  <div class="table-card" id="viewTabela">
+  <div class="modal-back hidden" id="leituraModal">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>Leitura de dados (Bot de atualização)</h3>
+        <button class="btn" id="btnFecharLeitura">Fechar</button>
+      </div>
+      <p class="sub" style="margin:0 0 12px">Anexe o arquivo exportado do NOC (Excel .xlsx/.xls ou .csv). O bot vai ler o arquivo e atualizar as câmeras offline/online no painel.</p>
+      <div class="filters" style="margin:0 0 12px">
+        <input type="file" id="arquivoLeitura" accept=".xlsx,.xls,.csv" style="max-width:420px">
+        <button class="btn active" id="btnProcessarLeitura">Processar arquivo</button>
+      </div>
+      <div id="leituraStatus" class="sub" style="margin:0 0 10px"></div>
+      <div class="table-scroll" style="max-height:260px">
+        <table>
+          <thead><tr><th>Campo</th><th>Valor</th></tr></thead>
+          <tbody id="leituraResumo"><tr><td colspan="2">Nenhum arquivo processado.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+<div class="table-card" id="viewTabela">
     <div class="table-scroll">
       <table>
         <thead><tr id="theadRow"></tr></thead>
@@ -151,9 +176,12 @@
   <footer id="rodape"></footer>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 const PAYLOAD = /*__DATA__*/null;
-const { stats, data, resumoMunicipios } = PAYLOAD;
+let stats = PAYLOAD.stats;
+let data = PAYLOAD.data;
+let resumoMunicipios = PAYLOAD.resumoMunicipios;
 
 /* ---------- Severidade ---------- */
 const SEVS = [
@@ -175,70 +203,104 @@ function fmtMin(m){
 }
 const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const norm = s => String(s??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/\s+/g,' ').trim();
-/* Quando embutido no sistema, os elementos vivem em um Shadow Root.
-   O escopo é capturado agora para que os handlers continuem funcionando
-   depois que o sistema remove a referência global temporária. */
 const __nocRoot = window.__nocRoot || document;
 const $ = id => __nocRoot.getElementById(id);
 
-/* ---------- Cabeçalho / KPIs ---------- */
-$('subtitulo').textContent =
-  `Fonte: ${stats.arquivoFonte} · Painel gerado em ${stats.geradoEm} · Dados 100% locais (funciona sem internet)`;
-$('rodape').textContent =
-  `Painel NOC local · ${stats.total} câmeras monitoradas em ${stats.municipios} municípios de Mato Grosso · Gerado em ${stats.geradoEm}`;
+function calcularStats(arr, meta={}){
+  const total=arr.length;
+  const offline=arr.filter(d=>d.status!=='Online').length;
+  const online=total-offline;
+  const municipios=[...new Set(arr.map(d=>d.municipio).filter(Boolean))];
+  const municipiosAfetados=[...new Set(arr.filter(d=>d.status!=='Online').map(d=>d.municipio).filter(Boolean))].length;
+  const mais24h=arr.filter(d=>d.status!=='Online' && d.offlineMin>=1440).length;
+  const mais7d=arr.filter(d=>d.status!=='Online' && d.offlineMin>=10080).length;
+  const desc24Total=arr.reduce((a,d)=>a+(Number(d.desc24)||0),0);
+  const slaMedio=total?Math.round(arr.reduce((a,d)=>a+(Number(d.slaTotal)||0),0)/total):0;
+  return {
+    total, offline, online,
+    municipios: municipios.length,
+    municipiosAfetados,
+    mais24h, mais7d, desc24Total, slaMedio,
+    geradoEm: meta.geradoEm || stats.geradoEm || new Date().toLocaleString('pt-BR'),
+    arquivoFonte: meta.arquivoFonte || stats.arquivoFonte || 'importado'
+  };
+}
+function calcularResumoMunicipios(arr){
+  const agg={};
+  arr.forEach(d=>{
+    const k=d.municipio||'SEM MUNICÍPIO';
+    const m=agg[k]||(agg[k]={municipio:k,total:0,offline:0,online:0,desc24:0,sla:0,max:0});
+    m.total++; m.desc24+=Number(d.desc24)||0; m.sla+=Number(d.slaTotal)||0;
+    if(d.status!=='Online'){ m.offline++; m.max=Math.max(m.max, Number(d.offlineMin)||0); }
+    else m.online++;
+  });
+  return Object.values(agg).map(m=>({
+    municipio:m.municipio,total:m.total,offline:m.offline,online:m.online,
+    desc24:m.desc24,sla: m.total?Math.round(m.sla/m.total):0,maxOfflineMin:m.max
+  })).sort((a,b)=>b.offline-a.offline||a.municipio.localeCompare(b.municipio,'pt-BR'));
+}
 
-const kpis = [
-  { v:stats.total,            l:'Câmeras no relatório',   c:'blue' },
-  { v:stats.offline,          l:'Offline agora',          c:'red' },
-  { v:stats.online,           l:'Online',                 c:'green' },
-  { v:stats.municipiosAfetados+'/'+stats.municipios, l:'Municípios afetados', c:'orange' },
-  { v:stats.mais24h,          l:'Offline há mais de 24h', c:'orange' },
-  { v:stats.mais7d,           l:'Críticas (> 7 dias)',    c:'purple' },
-  { v:stats.desc24Total.toLocaleString('pt-BR'), l:'Desconexões em 24h', c:'yellow' },
-  { v:stats.slaMedio+'%',     l:'SLA médio (total)',      c:'blue' },
-];
-$('kpis').innerHTML = kpis.map(k=>
-  `<div class="kpi ${k.c}"><div class="v">${k.v}</div><div class="l">${k.l}</div></div>`).join('');
+function renderDashboard(){
+  $('subtitulo').textContent =
+    `Fonte: ${stats.arquivoFonte} · Painel gerado em ${stats.geradoEm} · Dados 100% locais (funciona sem internet)`;
+  $('rodape').textContent =
+    `Painel NOC local · ${stats.total} câmeras monitoradas em ${stats.municipios} municípios de Mato Grosso · Gerado em ${stats.geradoEm}`;
+  const kpis = [
+    { v:stats.total,            l:'Câmeras no relatório',   c:'blue' },
+    { v:stats.offline,          l:'Offline agora',          c:'red' },
+    { v:stats.online,           l:'Online',                 c:'green' },
+    { v:stats.municipiosAfetados+'/'+stats.municipios, l:'Municípios afetados', c:'orange' },
+    { v:stats.mais24h,          l:'Offline há mais de 24h', c:'orange' },
+    { v:stats.mais7d,           l:'Críticas (> 7 dias)',    c:'purple' },
+    { v:stats.desc24Total.toLocaleString('pt-BR'), l:'Desconexões em 24h', c:'yellow' },
+    { v:stats.slaMedio+'%',     l:'SLA médio (total)',      c:'blue' },
+  ];
+  $('kpis').innerHTML = kpis.map(k=>
+    `<div class="kpi ${k.c}"><div class="v">${k.v}</div><div class="l">${k.l}</div></div>`).join('');
 
-/* ---------- Gráfico: municípios ---------- */
-const topMun = resumoMunicipios.filter(m=>m.offline>0).slice(0,12);
-const maxOff = Math.max(...topMun.map(m=>m.offline),1);
-$('chartMunicipios').innerHTML = topMun.map(m=>
-  `<div class="bar-row" title="${esc(m.municipio)}: ${m.offline} offline de ${m.total}">
-     <span class="name">${esc(m.municipio)}</span>
-     <div class="bar-track"><div class="bar-fill" style="width:${(m.offline/maxOff*100).toFixed(1)}%"></div></div>
-     <span class="num">${m.offline}</span>
-   </div>`).join('');
+  const topMun = resumoMunicipios.filter(m=>m.offline>0).slice(0,12);
+  const maxOff = Math.max(...topMun.map(m=>m.offline),1);
+  $('chartMunicipios').innerHTML = topMun.map(m=>
+    `<div class="bar-row" title="${esc(m.municipio)}: ${m.offline} offline de ${m.total}">
+       <span class="name">${esc(m.municipio)}</span>
+       <div class="bar-track"><div class="bar-fill" style="width:${(m.offline/maxOff*100).toFixed(1)}%"></div></div>
+       <span class="num">${m.offline}</span>
+     </div>`).join('');
 
-/* ---------- Gráfico: severidade ---------- */
-const sevCounts = SEVS.map(s=>({...s, n:data.filter(d=>{const x=sevDe(d);return x&&x.key===s.key;}).length}));
-const maxSev = Math.max(...sevCounts.map(s=>s.n),1);
-$('chartSeveridade').innerHTML = sevCounts.map(s=>
-  `<div class="sev-row">
-     <span><span class="sev" style="background:${s.color}">${s.label}</span></span>
-     <div class="bar-track"><div class="bar-fill" style="width:${(s.n/maxSev*100).toFixed(1)}%;background:${s.color}"></div></div>
-     <span class="num" style="color:${s.color}">${s.n}</span>
-   </div>`).join('');
+  const sevCounts = SEVS.map(s=>({...s, n:data.filter(d=>{const x=sevDe(d);return x&&x.key===s.key;}).length}));
+  const maxSev = Math.max(...sevCounts.map(s=>s.n),1);
+  $('chartSeveridade').innerHTML = sevCounts.map(s=>
+    `<div class="sev-row">
+       <span><span class="sev" style="background:${s.color}">${s.label}</span></span>
+       <div class="bar-track"><div class="bar-fill" style="width:${(s.n/maxSev*100).toFixed(1)}%;background:${s.color}"></div></div>
+       <span class="num" style="color:${s.color}">${s.n}</span>
+     </div>`).join('');
 
-/* ---------- Donut: categorias ---------- */
-const catColors = ['#38bdf8','#22c55e','#f97316','#a855f7','#eab308','#ef4444','#14b8a6','#f472b6','#8ea0bd'];
-const catCounts = {};
-data.forEach(d=>catCounts[d.categoria]=(catCounts[d.categoria]||0)+1);
-const cats = Object.entries(catCounts).sort((a,b)=>b[1]-a[1]);
-let acc=0; const stops=[];
-cats.forEach(([nome,n],i)=>{
-  const c=catColors[i%catColors.length], from=acc/data.length*360; acc+=n;
-  stops.push(`${c} ${from.toFixed(1)}deg ${(acc/data.length*360).toFixed(1)}deg`);
-});
-$('donut').style.background = `conic-gradient(${stops.join(',')})`;
-$('donutTotal').textContent = data.length;
-$('legendCategorias').innerHTML = cats.map(([nome,n],i)=>
-  `<div class="li"><span class="sw" style="background:${catColors[i%catColors.length]}"></span>${esc(nome)}<span class="cnt">${n}</span></div>`).join('');
+  const catColors = ['#38bdf8','#22c55e','#f97316','#a855f7','#eab308','#ef4444','#14b8a6','#f472b6','#8ea0bd'];
+  const catCounts = {};
+  data.forEach(d=>catCounts[d.categoria]=(catCounts[d.categoria]||0)+1);
+  const cats = Object.entries(catCounts).sort((a,b)=>b[1]-a[1]);
+  let acc=0; const stops=[];
+  cats.forEach(([nome,n],i)=>{
+    const c=catColors[i%catColors.length], from=acc/data.length*360; acc+=n;
+    stops.push(`${c} ${from.toFixed(1)}deg ${(acc/data.length*360).toFixed(1)}deg`);
+  });
+  $('donut').style.background = `conic-gradient(${stops.join(',')})`;
+  $('donutTotal').textContent = data.length;
+  $('legendCategorias').innerHTML = cats.map(([nome,n],i)=>
+    `<div class="li"><span class="sw" style="background:${catColors[i%catColors.length]}"></span>${esc(nome)}<span class="cnt">${n}</span></div>`).join('');
 
-/* ---------- Filtros ---------- */
-const municipios = [...new Set(data.map(d=>d.municipio))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
-municipios.forEach(m=>$('fMunicipio').insertAdjacentHTML('beforeend',`<option>${esc(m)}</option>`));
-cats.forEach(([c])=>$('fCategoria').insertAdjacentHTML('beforeend',`<option>${esc(c)}</option>`));
+  const selMun=$('fMunicipio').value, selCat=$('fCategoria').value;
+  $('fMunicipio').innerHTML='<option value="">Todos os municípios</option>';
+  $('fCategoria').innerHTML='<option value="">Todas as categorias</option>';
+  const municipios = [...new Set(data.map(d=>d.municipio))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  municipios.forEach(m=>$('fMunicipio').insertAdjacentHTML('beforeend',`<option>${esc(m)}</option>`));
+  cats.forEach(([c])=>$('fCategoria').insertAdjacentHTML('beforeend',`<option>${esc(c)}</option>`));
+  if(municipios.includes(selMun)) $('fMunicipio').value=selMun;
+  if(cats.some(([c])=>c===selCat)) $('fCategoria').value=selCat;
+}
+
+renderDashboard();
 
 let sortKey='offlineMin', sortDir=-1;
 const COLS = [
@@ -372,6 +434,155 @@ function exportar(){
 });
 $('btnTabela').onclick=()=>mostrar('tabela');
 $('btnMunicipios').onclick=()=>mostrar('municipios');
+
+/* ---------- Leitura de dados (Bot) ---------- */
+function abrirLeitura(){ $('leituraModal').classList.remove('hidden'); }
+function fecharLeitura(){ $('leituraModal').classList.add('hidden'); }
+$('btnLeitura').onclick=abrirLeitura;
+$('btnFecharLeitura').onclick=fecharLeitura;
+$('leituraModal').addEventListener('click',e=>{ if(e.target.id==='leituraModal') fecharLeitura(); });
+
+function normKey(k){ return norm(k).replace(/[^A-Z0-9]/g,''); }
+function pick(row, keys){
+  const map={}; for(const [k,v] of Object.entries(row||{})) map[normKey(k)]={k,v};
+  for(const k of keys){ const nk=normKey(k); if(map[nk] && String(map[nk].v??'').trim()!=='') return String(map[nk].v).trim(); }
+  for(const k of keys){ const nk=normKey(k); if(map[nk]) return String(map[nk].v??'').trim(); }
+  return '';
+}
+function parseDataBr(str){
+  const s=String(str||'').trim();
+  let m=s.match(/(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if(m){ const y=m[3].length===2?('20'+m[3]):m[3]; const d=new Date(+y,+m[2]-1,+m[1],+(m[4]||0),+(m[5]||0),+(m[6]||0)); if(!isNaN(d)) return d; }
+  m=s.match(/(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if(m){ const d=new Date(+m[1],+m[2]-1,+m[3],+(m[4]||0),+(m[5]||0),+(m[6]||0)); if(!isNaN(d)) return d; }
+  const d=new Date(s); return isNaN(d)?null:d;
+}
+function parseOfflineMin(str){
+  const s=norm(str);
+  if(!s) return 0;
+  if(s==='-'||s==='ONLINE'||s==='ON LINE') return 0;
+  let min=0;
+  const d=s.match(/(\d+)\s*D/); if(d) min+=+d[1]*1440;
+  const h=s.match(/(\d+)\s*H/); if(h) min+=+h[1]*60;
+  const m=s.match(/(\d+)\s*M/); if(m) min+=+m[1];
+  if(min>0) return min;
+  const hm=s.match(/(\d+):(\d+)/); if(hm) return (+hm[1]*60)+(+hm[2]);
+  const n=s.match(/(\d+)/); return n?+n[1]:0;
+}
+function parsePct(v){
+  const s=String(v??'').replace('%','').replace(',','.').trim();
+  const n=parseFloat(s); return isNaN(n)?0:Math.max(0,Math.min(100,Math.round(n)));
+}
+function parseStatus(v){
+  const s=norm(v);
+  if(!s) return 'Offline';
+  if(s.includes('ONLINE') && !s.includes('OFFLINE')) return 'Online';
+  if(s.includes('OFFLINE')) return 'Offline';
+  if(s.includes('ATIVO') || s.includes('UP')) return 'Online';
+  return 'Offline';
+}
+function linhaParaCamera(row, idx){
+  const idRaw = pick(row,['ID','Id','Camera ID','Câmera ID','Codigo','Código']);
+  const nome = pick(row,['Nome','Câmera / Local','Camera / Local','Camera','Local','Nome da Camera','Nome da Câmera']);
+  const municipio = pick(row,['Município','Municipio','Cidade']);
+  const categoria = pick(row,['Categoria','Tipo','Grupo']) || 'Municipal / Outros';
+  const respRaw = pick(row,['Responsáveis','Responsaveis','Responsável','Responsavel','Responsáveis ','Contato']);
+  const marcadores = pick(row,['Marcadores','Marcador','Tags','Tag']);
+  const status = parseStatus(pick(row,['Status','Situação','Situacao','Estado']));
+  const ultimoRaw = pick(row,['Último status','Ultimo status','Último','Ultimo','Last Status','Data Último Status','Data Ultimo Status','Atualizado em']);
+  const offlineRaw = pick(row,['Tempo offline','Tempo Offline','Offline há','Tempo','Downtime']);
+  const desc24 = Number(String(pick(row,['Desc. 24h','Desconexões 24h','Desconexoes 24h','Desc 24h','Desconexões'])).replace(/[^0-9-]/g,'')) || 0;
+  const sla24 = parsePct(pick(row,['SLA 24h','SLA 24']));
+  const slaTotal = parsePct(pick(row,['SLA total','SLA Total','SLA']));
+  const dt = parseDataBr(ultimoRaw);
+  const ultimoTs = dt ? dt.getTime() : 0;
+  const ultimo = dt ? dt.toLocaleString('pt-BR') : (ultimoRaw||'');
+  let offlineMin = parseOfflineMin(offlineRaw);
+  if(status==='Online') offlineMin = 0;
+  else if(!offlineMin && ultimoTs){ offlineMin = Math.max(0, Math.floor((Date.now()-ultimoTs)/60000)); }
+  const idNum = Number(String(idRaw).replace(/[^0-9]/g,''));
+  const id = idNum || (idx+1);
+  const responsaveis = respRaw ? respRaw.split(/\s*[|;/•·]\s*|\s{2,}/).map(x=>x.trim()).filter(Boolean) : [];
+  return {
+    id, idTexto: idRaw || String(id),
+    nome: nome || ('CÂMERA ' + id),
+    municipio: municipio || 'SEM MUNICÍPIO',
+    responsaveis, marcadores,
+    categoria, status, ultimo, ultimoTs,
+    offlineMin, offlineStr: status==='Online' ? 'Online' : fmtMin(offlineMin),
+    desc24, sla24, slaTotal
+  };
+}
+
+async function processarLeitura(){
+  const inp = $('arquivoLeitura');
+  const file = inp && inp.files && inp.files[0];
+  if(!file){ $('leituraStatus').textContent='Selecione um arquivo .xlsx, .xls ou .csv.'; return; }
+  if(window.__nocXlsxPromise) await window.__nocXlsxPromise;
+  if(typeof XLSX==='undefined'){ $('leituraStatus').textContent='Biblioteca de planilhas não carregada. Verifique a conexão e tente novamente.'; return; }
+  $('leituraStatus').textContent='Lendo arquivo...';
+  try{
+    const buf = await file.arrayBuffer();
+    let rows=[];
+    const name=file.name.toLowerCase();
+    if(name.endsWith('.csv')){
+      const text = new TextDecoder('utf-8').decode(buf).replace(/^\uFEFF/,'');
+      const primeiraLinha = text.split(/\r?\n/,1)[0] || '';
+      const separador = (primeiraLinha.match(/;/g)||[]).length > (primeiraLinha.match(/,/g)||[]).length ? ';' : ',';
+      const wb = XLSX.read(text, {type:'string', FS: separador});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      rows = XLSX.utils.sheet_to_json(ws, {defval:''});
+    } else {
+      const wb = XLSX.read(buf, {type:'array'});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      rows = XLSX.utils.sheet_to_json(ws, {defval:''});
+    }
+    if(!rows.length){ $('leituraStatus').textContent='Arquivo vazio ou formato não reconhecido.'; return; }
+
+    const parsed = rows.map((r,i)=>linhaParaCamera(r,i)).filter(r=>r.nome || r.idTexto);
+
+    // merge por idTexto/id/nome normalizado
+    const byId = new Map(data.map(d=>[normKey(String(d.idTexto||d.id)), d]));
+    const byNome = new Map(data.map(d=>[norm(d.nome), d]));
+    let atualizadas=0, novas=0, online=0, offline=0;
+    for(const n of parsed){
+      const kId=normKey(String(n.idTexto||n.id));
+      const kNome=norm(n.nome);
+      const ex = byId.get(kId) || byNome.get(kNome);
+      if(ex){
+        Object.assign(ex, n, { responsaveis: n.responsaveis.length?n.responsaveis:ex.responsaveis, marcadores: n.marcadores||ex.marcadores });
+        atualizadas++;
+      } else {
+        data.push(n); byId.set(kId,n); byNome.set(kNome,n); novas++;
+      }
+      if(n.status==='Online') online++; else offline++;
+    }
+
+    stats = calcularStats(data, { geradoEm: new Date().toLocaleString('pt-BR'), arquivoFonte: file.name });
+    resumoMunicipios = calcularResumoMunicipios(data);
+    PAYLOAD.stats = stats; PAYLOAD.data = data; PAYLOAD.resumoMunicipios = resumoMunicipios;
+    renderDashboard();
+    mostrar($('viewTabela').classList.contains('hidden') ? 'municipios' : 'tabela');
+
+    const resumo = [
+      ['Arquivo', file.name],
+      ['Linhas lidas', rows.length],
+      ['Câmeras processadas', parsed.length],
+      ['Atualizadas', atualizadas],
+      ['Novas', novas],
+      ['Offline no arquivo', offline],
+      ['Online no arquivo', online],
+      ['Total no painel', data.length]
+    ];
+    $('leituraResumo').innerHTML = resumo.map(([k,v])=>`<tr><td><b>${esc(k)}</b></td><td>${esc(String(v))}</td></tr>`).join('');
+    $('leituraStatus').textContent = 'Bot concluiu a leitura e atualizou o painel.';
+  }catch(err){
+    console.error(err);
+    $('leituraStatus').textContent = 'Falha ao ler arquivo: ' + (err && err.message ? err.message : err);
+  }
+}
+$('btnProcessarLeitura').onclick=processarLeitura;
+
 $('btnExport').onclick=exportar;
 $('btnLimpar').onclick=()=>{
   $('busca').value=''; $('fMunicipio').value=''; $('fCategoria').value='';

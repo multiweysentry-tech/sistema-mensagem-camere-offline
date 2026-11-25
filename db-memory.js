@@ -286,31 +286,72 @@ async function setBotConfig(key, value, tenantId = 'default') {
 async function getReports(tenantId = 'default') {
   const t = tenant(tenantId);
   const cameras = [...state.cameras.values()].filter(c => c.tenant_id === t);
-  const logs = [...state.log].filter(l => l.tenant_id === t);
+  const logs = [...state.log].filter(l => l.tenant_id === t).sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
   const counts = { Pendente: 0, 'Aguardando resposta': 0, Verificando: 0, Suporte: 0, 'Aguardando validacao': 0, Resolvido: 0 };
+  const porResponsavel = new Map();
+  const temposResolucao = [];
+  const agora = Date.now();
+
   for (const c of cameras) {
-    const status = String(c.status || '').trim();
-    if (counts[status] !== undefined) counts[status]++;
+    const st = String(c.status || '').trim();
+    if (counts[st] !== undefined) counts[st] += 1;
+    const resp = String(c.responsavel_nome || 'Sem responsável').trim() || 'Sem responsável';
+    const item = porResponsavel.get(resp) || { responsavel: resp, telefone: c.responsavel_telefone || '', total: 0, abertas: 0, resolvidas: 0, atrasadas: 0 };
+    item.total += 1;
+    if (st === 'Resolvido') item.resolvidas += 1;
+    else {
+      item.abertas += 1;
+      const base = Date.parse(c.ultima_cobranca || '') || 0;
+      if (base && agora - base > 24 * 3600000) item.atrasadas += 1;
+    }
+    porResponsavel.set(resp, item);
+    if (st === 'Resolvido' && c.data_resolucao) {
+      const fim = Date.parse(c.data_resolucao);
+      const inicio = Date.parse(c.ultima_cobranca || '') || fim;
+      if (Number.isFinite(fim) && Number.isFinite(inicio) && fim >= inicio) temposResolucao.push(fim - inicio);
+    }
   }
-  const resolvidas = cameras.filter(c => c.status === 'Resolvido' && c.data_resolucao);
-  let tempoMedio = null;
-  if (resolvidas.length > 0) {
-    const total = resolvidas.reduce((acc, c) => acc + (new Date(c.data_resolucao) - new Date(c.ultima_cobranca || c.data_resolucao)), 0);
-    tempoMedio = Math.round(total / resolvidas.length / 3600000);
+
+  const tempoMedioHoras = temposResolucao.length ? Math.round((temposResolucao.reduce((a, b) => a + b, 0) / temposResolucao.length / 3600000) * 10) / 10 : null;
+  const recentWindow = Date.now() - 24 * 3600000;
+  const recentMessages = [...state.messages.values()].filter(m => m.tenant_id === t && Date.parse(m.time || '') >= recentWindow);
+  const entregas = { pendente: 0, enviada: 0, entregue: 0, lida: 0, falhou: 0 };
+  for (const d of state.deliveries.values()) {
+    if (d.tenant_id !== t) continue;
+    const k = String(d.status || '');
+    if (entregas[k] !== undefined) entregas[k] += 1;
   }
-  const today = new Date().toISOString().slice(0, 10);
-  const todayMessages = [...state.messages.values()].filter(m => m.tenant_id === t && String(m.time).startsWith(today));
+
   return {
     counts,
     total: cameras.length,
-    tempoMedioHoras: tempoMedio,
+    tempoMedioHoras,
+    tempoMaxHoras: temposResolucao.length ? Math.round((Math.max(...temposResolucao) / 3600000) * 10) / 10 : null,
+    tempoMinHoras: temposResolucao.length ? Math.round((Math.min(...temposResolucao) / 3600000) * 10) / 10 : null,
     cobrancasEnviadas: logs.filter(l => l.acao === 'COBRANCA_ENVIADA').length,
-    erros: logs.filter(l => l.acao === 'ERRO').length,
-    escalonamentos: logs.filter(l => l.acao === 'ESCALONAMENTO').length,
-    resolvidas: resolvidas.length,
-    enviadasHoje: todayMessages.filter(m => m.direction === 'out').length,
-    recebidasHoje: todayMessages.filter(m => m.direction === 'in').length,
-    clientesAguardando: [...state.conversations.values()].filter(c => c.tenant_id === t && Number(c.unread) > 0).length
+    enviosSemConfirmacao: logs.filter(l => ['ENVIO_SEM_CONFIRMACAO', 'ENVIO_AGUARDANDO_CONFIRMACAO'].includes(l.acao)).length,
+    erros: logs.filter(l => ['ERRO', 'ENVIO_FALHOU'].includes(l.acao)).length,
+    escalonamentos: logs.filter(l => l.acao === 'ESCALONAMENTO' || (l.acao === 'RESPOSTA_RECEBIDA' && l.status_novo === 'Suporte')).length,
+    respostasRecebidas: logs.filter(l => l.acao === 'RESPOSTA_RECEBIDA').length,
+    resolvidas: counts.Resolvido,
+    enviadasHoje: recentMessages.filter(m => m.direction === 'out').length,
+    recebidasHoje: recentMessages.filter(m => m.direction === 'in').length,
+    clientesAguardando: [...state.conversations.values()].filter(c => c.tenant_id === t && Number(c.unread) > 0).length,
+    entregas,
+    responsaveisTop: [...porResponsavel.values()].sort((a, b) => b.abertas - a.abertas || b.total - a.total).slice(0, 10),
+    atividadesRecentes: logs.slice(0, 15).map(l => ({
+      timestamp: l.timestamp, acao: l.acao, camera: l.camera_nome || l.camera_id || '',
+      responsavel: l.responsavel_telefone || '', detalhe: l.detalhe || '',
+      anterior: l.status_anterior || '', novo: l.status_novo || ''
+    })),
+    camerasAbertasAntigas: cameras
+      .filter(c => c.status !== 'Resolvido')
+      .map(c => {
+        const base = Date.parse(c.ultima_cobranca || '') || 0;
+        return { id: c.id, nome: c.camera_nome || c.id, responsavel: c.responsavel_nome || '', status: c.status, horasAberta: base ? Math.round(((agora - base) / 3600000) * 10) / 10 : null };
+      })
+      .sort((a, b) => (b.horasAberta || 0) - (a.horasAberta || 0))
+      .slice(0, 10)
   };
 }
 
