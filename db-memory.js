@@ -18,7 +18,8 @@ const state = {
   users: new Map(),
   userSessions: new Map(),
   instances: new Map(),
-  jobs: new Map()
+  jobs: new Map(),
+  nocFiles: new Map()
 };
 
 const CAMERA_FIELDS = ['camera_nome', 'local', 'responsavel_nome', 'responsavel_telefone', 'email', 'status', 'tentativas', 'ultima_cobranca', 'data_resolucao', 'observacoes'];
@@ -532,10 +533,32 @@ async function findDeliveryByExternalId(id) {
   };
 }
 
+async function saveNocFile(row, tenantId = 'default') {
+  const key = scopedKey(row.id, tenantId);
+  state.nocFiles.set(key, { ...row, tenant_id: tenant(row.tenant_id || tenantId) });
+  return row;
+}
+
+async function getLatestNocFile(tenantId = 'default') {
+  return [...state.nocFiles.values()]
+    .filter(row => row.tenant_id === tenant(tenantId))
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
+}
+
+async function listNocFiles(tenantId = 'default', limit = 20) {
+  return [...state.nocFiles.values()]
+    .filter(row => row.tenant_id === tenant(tenantId))
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    .slice(0, Math.max(1, Math.min(Number(limit) || 20, 100)));
+}
+
 module.exports = {
   mode,
   init,
   scopedKey,
+  saveNocFile,
+  getLatestNocFile,
+  listNocFiles,
   getCameras,
   upsertCamera,
   updateCamera,

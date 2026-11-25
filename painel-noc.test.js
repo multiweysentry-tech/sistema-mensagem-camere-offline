@@ -27,6 +27,10 @@ test('leitura de dados do painel tem botão, regexes válidas e texto íntegro',
   assert.match(gerado, /<button[^>]+id="btnEnviarOffline"/);
   assert.match(gerado, /new CustomEvent\('noc:offline'/);
   assert.match(gerado, /id="leituraModal"/);
+  assert.match(gerado, /<button[^>]+id="btnSalvarLeitura"/);
+  assert.match(gerado, /async function salvarLeitura\(/);
+  assert.match(gerado, /window\.addEventListener\('noc:payload'/);
+  assert.match(gerado, /COLUNAS_ARMAZENAMENTO/);
   assert.ok(gerado.includes('(\\d{1,2})[/-](\\d{1,2})'), 'regex de data perdeu \\d');
   assert.ok(gerado.includes('\\s*[|;/•·]\\s*'), 'separador de responsáveis perdeu \\s');
   assert.match(gerado, /XLSX\.read\(text, \{type:'string', FS: separador\}\)/, 'CSV não informa o separador ao XLSX');
@@ -51,5 +55,8 @@ test('view nativa executa todos os scripts e carrega dependências externas', ()
   assert.match(app, /querySelectorAll\("script"\)/);
   assert.match(app, /Promise\.all\(externos\.map\(carregarScriptNOC\)\)/);
   assert.match(app, /host\.shadowRoot/);
+  assert.match(app, /window\.__nocStorageEndpoint="\/api\/noc\/arquivos"/);
+  assert.match(app, /async function restaurarUltimoArquivoNOC\(/);
+  assert.match(app, /new CustomEvent\("noc:payload"/);
   assert.match(gerado, /window\.__nocXlsxPromise/);
 });

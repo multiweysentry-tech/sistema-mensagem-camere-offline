@@ -89,6 +89,7 @@ function createApp(options = {}) {
   const nocWatcher = options.nocWatcher || null;
   const app = express();
   const whatsappSendsInProgress = new Set();
+  const nocStorage = require('./lib/noc-storage');
   const server = http.createServer(app);
   const io = new Server(server);
 
@@ -183,7 +184,7 @@ function createApp(options = {}) {
   const jsonParserDefault = express.json({ limit: '1mb' });
   const jsonParserLarge = express.json({ limit: '15mb' });
   app.use((req, res, next) => {
-    if (req.path === '/api/import/pdf/scan') return jsonParserLarge(req, res, next);
+    if (req.path === '/api/import/pdf/scan' || req.path === '/api/noc/arquivos') return jsonParserLarge(req, res, next);
     return jsonParserDefault(req, res, next);
   });
   app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
@@ -676,6 +677,48 @@ function createApp(options = {}) {
       return res.json({ schedulers: bots.getSchedulerStatus ? bots.getSchedulerStatus() : 'managed by server' });
     } catch (error) {
       return res.status(500).json({ erro: error.message });
+    }
+  });
+
+  // --- Armazenamento do arquivo lido na aba "Leitura de dados" ---
+  app.post('/api/noc/arquivos', async (req, res) => {
+    try {
+      const csv = typeof req.body?.csv === 'string' ? req.body.csv : '';
+      const filename = String(req.body?.nomeArquivo || 'noc-importado.csv');
+      const resultado = await nocStorage.saveNocFile({
+        db,
+        tenantId: req.tenantId || 'default',
+        filename,
+        csvText: csv
+      });
+      return res.status(201).json({
+        ok: true, registro: resultado.registro, payload: resultado.payload
+      });
+    } catch (error) {
+      return res.status(400).json({ codigo: 'NOC_FILE_ERROR', erro: error.message });
+    }
+  });
+
+  app.get('/api/noc/arquivos/ultimo', async (req, res) => {
+    try {
+      const registro = await nocStorage.getLatestNocFile(db, req.tenantId || 'default');
+      if (!registro) return res.json({ ok: true, registro: null, payload: null });
+      const { conteudo, ...metadados } = registro;
+      const payload = typeof registro.payload === 'string'
+        ? JSON.parse(registro.payload)
+        : registro.payload;
+      return res.json({ ok: true, registro: metadados, payload });
+    } catch (error) {
+      return res.status(500).json({ codigo: 'NOC_FILE_ERROR', erro: error.message });
+    }
+  });
+
+  app.get('/api/noc/arquivos', async (req, res) => {
+    try {
+      const limite = Math.max(1, Math.min(Number(req.query.limite) || 20, 100));
+      return res.json({ ok: true, arquivos: await nocStorage.listNocFiles(db, req.tenantId || 'default', limite) });
+    } catch (error) {
+      return res.status(500).json({ codigo: 'NOC_FILE_ERROR', erro: error.message });
     }
   });
 

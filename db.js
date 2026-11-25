@@ -14,7 +14,7 @@ pool.on('error', error => log('error', 'db.idle_error', { error }));
 
 const DATA_TABLES = [
   'cameras', 'log', 'conversations', 'messages', 'message_delivery', 'consent',
-  'blocklist', 'message_templates', 'bot_config', 'app_migrations'
+  'blocklist', 'message_templates', 'bot_config', 'app_migrations', 'noc_arquivos'
 ];
 
 function tenant(value) {
@@ -113,6 +113,12 @@ async function init() {
       created_at TEXT, finished_at TEXT,
       UNIQUE (tenant_id, idempotency_key)
     );
+    CREATE TABLE IF NOT EXISTS noc_arquivos (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default',
+      nome TEXT NOT NULL, conteudo TEXT NOT NULL, linhas INTEGER NOT NULL DEFAULT 0,
+      stats TEXT NOT NULL DEFAULT '{}', payload TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
   `);
 
   for (const table of DATA_TABLES) {
@@ -126,6 +132,7 @@ async function init() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_tenant_time ON messages(tenant_id, time)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_delivery_tenant_time ON message_delivery(tenant_id, created_at DESC)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(status, run_at)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_noc_arquivos_tenant_data ON noc_arquivos(tenant_id, created_at DESC)');
 
   const tpl = await pool.query("SELECT id FROM message_templates WHERE id='cobranca_padrao' AND tenant_id='default'");
   if (tpl.rows.length === 0) {
@@ -646,8 +653,38 @@ async function findDeliveryByExternalId(id) {
     : null;
 }
 
+async function saveNocFile(row, tenantId = 'default') {
+  await pool.query(
+    `INSERT INTO noc_arquivos (id,tenant_id,nome,conteudo,linhas,stats,payload,created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (id) DO UPDATE SET
+       nome=EXCLUDED.nome, conteudo=EXCLUDED.conteudo, linhas=EXCLUDED.linhas,
+       stats=EXCLUDED.stats, payload=EXCLUDED.payload, created_at=EXCLUDED.created_at`,
+    [row.id, tenant(row.tenant_id || tenantId), row.nome, row.conteudo, Number(row.linhas) || 0,
+      row.stats, row.payload, row.created_at]
+  );
+  return row;
+}
+
+async function getLatestNocFile(tenantId = 'default') {
+  const r = await pool.query(
+    'SELECT * FROM noc_arquivos WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 1',
+    [tenant(tenantId)]
+  );
+  return r.rows[0] || null;
+}
+
+async function listNocFiles(tenantId = 'default', limit = 20) {
+  const r = await pool.query(
+    'SELECT * FROM noc_arquivos WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2',
+    [tenant(tenantId), Math.max(1, Math.min(Number(limit) || 20, 100))]
+  );
+  return r.rows;
+}
+
 module.exports = {
   pool, init, scopedKey,
+  saveNocFile, getLatestNocFile, listNocFiles,
   registerDelivery, updateDeliveryStatus, getDeliveries, findDeliveryByExternalId,
   getCameras, upsertCamera, updateCamera, deleteCamera,
   addLog, getLog, hasRecentLog,

@@ -151,6 +151,7 @@
       <div class="filters" style="margin:0 0 12px">
         <input type="file" id="arquivoLeitura" accept=".xlsx,.xls,.csv" style="max-width:420px">
         <button class="btn active" id="btnProcessarLeitura">Processar arquivo</button>
+        <button class="btn" id="btnSalvarLeitura" disabled title="Processe um arquivo antes de salvar">💾 Salvar e atualizar</button>
       </div>
       <div id="leituraStatus" class="sub" style="margin:0 0 10px"></div>
       <div class="table-scroll" style="max-height:260px">
@@ -183,6 +184,9 @@ const PAYLOAD = {"stats":{"total":856,"offline":855,"online":1,"municipios":92,"
 let stats = PAYLOAD.stats;
 let data = PAYLOAD.data;
 let resumoMunicipios = PAYLOAD.resumoMunicipios;
+// Última leitura pronta para persistir. Preenchido após processar o anexo ou
+// quando o aplicativo principal restaura um arquivo salvo no armazenamento.
+let leituraAtual = null;
 
 /* ---------- Severidade ---------- */
 const SEVS = [
@@ -541,6 +545,8 @@ async function processarLeitura(){
   if(!file){ $('leituraStatus').textContent='Selecione um arquivo .xlsx, .xls ou .csv.'; return; }
   if(window.__nocXlsxPromise) await window.__nocXlsxPromise;
   if(typeof XLSX==='undefined'){ $('leituraStatus').textContent='Biblioteca de planilhas não carregada. Verifique a conexão e tente novamente.'; return; }
+  const btnSalvar=$('btnSalvarLeitura');
+  if(btnSalvar)btnSalvar.disabled=true;
   $('leituraStatus').textContent='Lendo arquivo...';
   try{
     const buf = await file.arrayBuffer();
@@ -596,13 +602,98 @@ async function processarLeitura(){
       ['Total no painel', data.length]
     ];
     $('leituraResumo').innerHTML = resumo.map(([k,v])=>`<tr><td><b>${esc(k)}</b></td><td>${esc(String(v))}</td></tr>`).join('');
-    $('leituraStatus').textContent = 'Bot concluiu a leitura e atualizou o painel.';
+    prepararLeituraParaSalvar(file.name);
+    $('leituraStatus').textContent = 'Bot concluiu a leitura e atualizou o painel. Clique em "Salvar e atualizar" para persistir os dados.';
   }catch(err){
     console.error(err);
     $('leituraStatus').textContent = 'Falha ao ler arquivo: ' + (err && err.message ? err.message : err);
   }
 }
+
+/* ---------- Persistência da leitura ---------- */
+const COLUNAS_ARMAZENAMENTO = [
+  'ID','Nome','Município','Categoria','Responsáveis','Marcadores','Status',
+  'Último status','Tempo offline','Desconexões 24h','SLA 24h','SLA total'
+];
+function csvParaArmazenamento(){
+  const citar = v => `"${String(v ?? '').replace(/"/g,'""')}"`;
+  const linhas = (Array.isArray(data)?data:[]).map(d=>[
+    d.idTexto || d.id,
+    d.nome,
+    d.municipio,
+    d.categoria,
+    Array.isArray(d.responsaveis) ? d.responsaveis.join(' | ') : (d.responsaveis||''),
+    Array.isArray(d.marcadores) ? d.marcadores.join(' | ') : (d.marcadores||''),
+    d.status,
+    d.ultimo,
+    d.status==='Online' ? 'Online' : (d.offlineStr || fmtMin(d.offlineMin)),
+    d.desc24,
+    (Number(d.sla24)||0)+'%',
+    (Number(d.slaTotal)||0)+'%'
+  ]);
+  return [COLUNAS_ARMAZENAMENTO, ...linhas.map(l=>l.map(citar).join(';'))].join('\r\n');
+}
+function prepararLeituraParaSalvar(nomeArquivo){
+  leituraAtual = {
+    csv: csvParaArmazenamento(),
+    nomeArquivo: String(nomeArquivo || stats.arquivoFonte || 'noc-importado.csv')
+  };
+  const btn=$('btnSalvarLeitura');
+  if(btn)btn.disabled=false;
+}
+function aplicarPayloadSalvo(payload, nomeArquivo){
+  if(!payload || !Array.isArray(payload.data) || !payload.data.length) return false;
+  data = payload.data;
+  stats = payload.stats || calcularStats(data, { arquivoFonte: nomeArquivo || stats.arquivoFonte });
+  resumoMunicipios = payload.resumoMunicipios || calcularResumoMunicipios(data);
+  PAYLOAD.stats = stats; PAYLOAD.data = data; PAYLOAD.resumoMunicipios = resumoMunicipios;
+  renderDashboard();
+  mostrar($('viewTabela').classList.contains('hidden') ? 'municipios' : 'tabela');
+  prepararLeituraParaSalvar(nomeArquivo || stats.arquivoFonte);
+  return true;
+}
+async function salvarLeitura(){
+  if(!leituraAtual){ $('leituraStatus').textContent='Processe um arquivo antes de salvar.'; return; }
+  const btn=$('btnSalvarLeitura'), anterior=btn.textContent;
+  btn.disabled=true; btn.textContent='Salvando...';
+  $('leituraStatus').textContent='Salvando dados no armazenamento...';
+  try{
+    const corpo = JSON.stringify({ csv: leituraAtual.csv, nomeArquivo: leituraAtual.nomeArquivo });
+    const opcoes = {
+      method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'}, body:corpo
+    };
+    const endpoint = window.__nocStorageEndpoint || '/api/noc/arquivos';
+    let resp=null;
+    try{ resp = await fetch(endpoint, opcoes); }catch(err){ resp=null; }
+    // Painel standalone: o servidor local expõe POST /api/importar.
+    // Só faz fallback quando a rota não existe; erros de validação devem aparecer.
+    if(!resp || resp.status===404) resp = await fetch('/api/importar', opcoes);
+    const json = await resp.json().catch(()=>({}));
+    if(!resp.ok) throw new Error(json.erro || json.message || `Erro HTTP ${resp.status}`);
+    const payload = json.payload || (json.stats && json.data ? {
+      stats: json.stats, data: json.data, resumoMunicipios: json.resumoMunicipios
+    } : null);
+    if(payload) aplicarPayloadSalvo(payload, json.registro?.nome || leituraAtual.nomeArquivo);
+    $('leituraStatus').textContent = '✅ Dados salvos no armazenamento e painel atualizado.';
+    window.dispatchEvent(new CustomEvent('noc:Stored',{detail:{registro:json.registro||null}}));
+  }catch(err){
+    console.error(err);
+    $('leituraStatus').textContent = 'Falha ao salvar: ' + (err && err.message ? err.message : err);
+  }finally{
+    btn.textContent=anterior; btn.disabled=false;
+  }
+}
+if(window.__nocPayloadHandler)window.removeEventListener('noc:payload',window.__nocPayloadHandler);
+window.__nocPayloadHandler = e=>{
+  const detail=e.detail||{};
+  if(aplicarPayloadSalvo(detail.payload, detail.registro?.nome)){
+    $('leituraStatus').textContent='Dados restaurados do armazenamento.';
+  }
+};
+window.addEventListener('noc:payload',window.__nocPayloadHandler);
 $('btnProcessarLeitura').onclick=processarLeitura;
+$('btnSalvarLeitura').onclick=salvarLeitura;
 
 $('btnExport').onclick=exportar;
 $('btnLimpar').onclick=()=>{
