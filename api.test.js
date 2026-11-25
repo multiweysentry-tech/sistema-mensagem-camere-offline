@@ -235,6 +235,7 @@ test('Vercel Datafy provider resolves its number id and registers the signed web
     'VERCEL', 'API_KEY', 'DATABASE_URL', 'POSTGRES_URL', 'PG_HOST', 'PG_PASSWORD',
     'META_WA_ACCESS_TOKEN', 'META_WA_PHONE_NUMBER_ID', 'META_WA_APP_SECRET', 'META_WA_VERIFY_TOKEN',
     'DATAFY_WA_ACCESS_TOKEN', 'DATAFY_WA_PHONE_NUMBER_ID', 'DATAFY_WA_WEBHOOK_SECRET',
+    'DATAFY_WA_TEMPLATE_NAME', 'DATAFY_WA_TEMPLATE_LANGUAGE',
     'DATAFY_WA_TIMEOUT_MS', 'WHATSAPP_PROVIDER', 'WHATSAPP_BRIDGE_URL'
   ];
   const previousEnvironment = new Map(environmentKeys.map(key => [key, process.env[key]]));
@@ -252,6 +253,8 @@ test('Vercel Datafy provider resolves its number id and registers the signed web
   process.env.DATAFY_WA_ACCESS_TOKEN = 'test-datafy-token';
   process.env.DATAFY_WA_PHONE_NUMBER_ID = '';
   process.env.DATAFY_WA_WEBHOOK_SECRET = 'test-datafy-webhook-secret';
+  process.env.DATAFY_WA_TEMPLATE_NAME = 'sentry_camera_offline';
+  process.env.DATAFY_WA_TEMPLATE_LANGUAGE = 'pt_BR';
   process.env.DATAFY_WA_TIMEOUT_MS = '';
   process.env.WHATSAPP_PROVIDER = 'datafy';
   process.env.WHATSAPP_BRIDGE_URL = '';
@@ -261,7 +264,10 @@ test('Vercel Datafy provider resolves its number id and registers the signed web
   const requests = [];
   global.fetch = async (url, options) => {
     requests.push({ url, options });
-    return new Response(JSON.stringify({ phone_number_id: 'resolved-phone-id' }), { status: 200 });
+    return new Response(JSON.stringify({
+      phone_number_id: 'resolved-phone-id',
+      waba_id: '1400357781906126'
+    }), { status: 200 });
   };
   const handler = require('./api/index');
   const server = http.createServer((request, response) => handler(request, response));
@@ -291,6 +297,14 @@ test('Vercel Datafy provider resolves its number id and registers the signed web
   assert.equal(account.body.phoneIdMatches, null);
   assert.equal(requests.length, 2);
   assert.equal(requests[1].url, 'https://cloud.datafyapi.com.br/me');
+
+  const templates = await requestJson(server.address().port, '/api/whatsapp/templates');
+  assert.equal(templates.status, 200);
+  assert.equal(templates.body.ok, true);
+  assert.deepEqual(templates.body.configuredTemplate, { name: 'sentry_camera_offline', language: 'pt_BR' });
+  assert.equal(templates.body.match, null);
+  assert.equal(requests.length, 3);
+  assert.match(requests[2].url, /\/message_templates/);
 
   const webhook = await requestRaw(server.address().port, '/api/whatsapp/datafy/webhook', {
     method: 'POST',

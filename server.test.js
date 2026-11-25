@@ -371,6 +371,19 @@ test('Datafy account endpoint checks the linked number without sending messages'
         phoneIdMatches: true,
         checkedAt: '2026-11-25T20:00:00.000Z'
       };
+    },
+    async listTemplates() {
+      return {
+        configuredName: 'sentry_camera_offline',
+        configuredLanguage: 'pt_BR',
+        templates: [
+          { name: 'sentry_camera_offline', language: 'en_US', status: 'APPROVED', category: 'UTILITY' },
+          { name: 'sentry_camera_offline', language: 'pt_BR', status: 'PENDING', category: 'UTILITY' },
+          { name: 'outro_template', language: 'pt_BR', status: 'APPROVED', category: 'MARKETING' }
+        ],
+        hasMore: false,
+        checkedAt: '2026-11-25T20:00:01.000Z'
+      };
     }
   };
   const bots = createBots({ db, wa, schedulerApi: { schedule: () => ({ stop() {} }) } });
@@ -391,6 +404,20 @@ test('Datafy account endpoint checks the linked number without sending messages'
   assert.equal(result.body.phoneIdMatches, true);
   assert.equal(result.body.checkedAt, '2026-11-25T20:00:00.000Z');
   assert.equal(accountChecks, 1);
+  assert.equal(db.sentMessages.length, 0);
+
+  const templates = await jsonRequest(`http://127.0.0.1:${server.address().port}`, '/api/whatsapp/templates');
+  assert.equal(templates.response.status, 200);
+  assert.equal(templates.body.ok, true);
+  assert.deepEqual(templates.body.configuredTemplate, { name: 'sentry_camera_offline', language: 'pt_BR' });
+  assert.deepEqual(templates.body.match, {
+    name: 'sentry_camera_offline',
+    language: 'pt_BR',
+    status: 'PENDING',
+    category: 'UTILITY'
+  });
+  assert.equal(templates.body.sameName.length, 2);
+  assert.equal(templates.body.templates.length, 3);
   assert.equal(db.sentMessages.length, 0);
 });
 

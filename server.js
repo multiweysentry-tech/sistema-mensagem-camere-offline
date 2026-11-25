@@ -473,6 +473,47 @@ function createApp(options = {}) {
     }
   });
 
+  // Lista templates aprovados/pendentes na conta Datafy vinculada ao token.
+  // Nenhum template é enviado: a consulta usa apenas GET na API da Datafy.
+  app.get('/api/whatsapp/templates', async (req, res) => {
+    if (wa.provider !== 'datafy' || typeof wa.listTemplates !== 'function') {
+      return res.status(400).json({
+        codigo: 'UNSUPPORTED_PROVIDER',
+        erro: 'A consulta de templates esta disponivel apenas para WHATSAPP_PROVIDER=datafy'
+      });
+    }
+    try {
+      const info = await wa.listTemplates({ limit: 50 });
+      const nome = String(info.configuredName || '');
+      const idioma = String(info.configuredLanguage || 'pt_BR');
+      const templates = (info.templates || []).map(item => ({
+        name: String(item.name || ''),
+        language: String(item.language || ''),
+        status: String(item.status || ''),
+        category: String(item.category || '')
+      }));
+      return res.json({
+        ok: true,
+        provider: 'datafy',
+        configuredTemplate: { name: nome, language: idioma },
+        match: templates.find(item => item.name === nome && item.language === idioma) || null,
+        sameName: templates.filter(item => item.name === nome),
+        templates,
+        hasMore: Boolean(info.hasMore),
+        checkedAt: info.checkedAt
+      });
+    } catch (error) {
+      return res.status(502).json({
+        ok: false,
+        provider: 'datafy',
+        codigo: 'DATAFY_TEMPLATES_CHECK_FAILED',
+        erro: safeUpstreamError(error),
+        httpStatus: error?.status || null,
+        datafyCode: error?.datafyCode || null
+      });
+    }
+  });
+
   // Status real de cada alerta. O timeout é calculado na leitura para funcionar
   // também no Vercel, onde não existe processo em background.
   app.get('/api/whatsapp/delivery', async (req, res) => {
