@@ -79,6 +79,15 @@ async function upsertCamera(cam, tenantId = 'default') {
   state.cameras.set(id, row);
 }
 
+async function upsertCamerasBulk(cameras = [], tenantId = 'default') {
+  let gravadas = 0;
+  for (const cam of cameras || []) {
+    await upsertCamera(cam, tenantId);
+    gravadas++;
+  }
+  return gravadas;
+}
+
 async function updateCamera(id, fields, tenantId = 'default') {
   const current = state.cameras.get(scopedKey(id, tenantId));
   if (!current || current.tenant_id !== tenant(tenantId)) return;
@@ -573,6 +582,7 @@ module.exports = {
   deleteNocFiles,
   getCameras,
   upsertCamera,
+  upsertCamerasBulk,
   updateCamera,
   deleteCamera,
   addLog,

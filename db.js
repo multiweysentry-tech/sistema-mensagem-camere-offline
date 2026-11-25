@@ -192,6 +192,57 @@ async function upsertCamera(cam, tenantId = 'default') {
       [id, t, ...values]);
   }
 }
+// Grava muitas câmeras em uma única ida ao banco. O fluxo NOC pode importar
+// centenas de câmeras por vez; chamadas individuais estouram o timeout do Vercel.
+async function upsertCamerasBulk(cameras = [], tenantId = 'default') {
+  if (!Array.isArray(cameras) || !cameras.length) return 0;
+  const t = tenant(tenantId);
+  const rows = cameras.map(cam => ({
+    id: scopedKey(cam.id, t),
+    tenant_id: t,
+    instance_id: cam.instance_id || 'default',
+    camera_nome: cam.camera_nome || '',
+    local: cam.local || '',
+    responsavel_nome: cam.responsavel_nome || '',
+    responsavel_telefone: cam.responsavel_telefone || '',
+    email: cam.email || '',
+    status: cam.status || 'Pendente',
+    tentativas: Number(cam.tentativas) || 0,
+    ultima_cobranca: cam.ultima_cobranca || '',
+    data_resolucao: cam.data_resolucao || '',
+    observacoes: cam.observacoes || ''
+  }));
+  await pool.query(`
+    INSERT INTO cameras (
+      id, tenant_id, instance_id, camera_nome, local, responsavel_nome,
+      responsavel_telefone, email, status, tentativas, ultima_cobranca,
+      data_resolucao, observacoes
+    )
+    SELECT id, tenant_id, instance_id, camera_nome, local, responsavel_nome,
+           responsavel_telefone, email, status, tentativas, ultima_cobranca,
+           data_resolucao, observacoes
+    FROM jsonb_to_recordset($1::jsonb) AS x(
+      id text, tenant_id text, instance_id text, camera_nome text, local text,
+      responsavel_nome text, responsavel_telefone text, email text, status text,
+      tentativas integer, ultima_cobranca text, data_resolucao text, observacoes text
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      tenant_id = EXCLUDED.tenant_id,
+      instance_id = EXCLUDED.instance_id,
+      camera_nome = EXCLUDED.camera_nome,
+      local = EXCLUDED.local,
+      responsavel_nome = EXCLUDED.responsavel_nome,
+      responsavel_telefone = EXCLUDED.responsavel_telefone,
+      email = EXCLUDED.email,
+      status = EXCLUDED.status,
+      tentativas = EXCLUDED.tentativas,
+      ultima_cobranca = EXCLUDED.ultima_cobranca,
+      data_resolucao = EXCLUDED.data_resolucao,
+      observacoes = EXCLUDED.observacoes
+  `, [JSON.stringify(rows)]);
+  return rows.length;
+}
+
 async function updateCamera(id, fields, tenantId = 'default') {
   const allowed = new Set(['camera_nome','local','responsavel_nome','responsavel_telefone','email','status','tentativas','ultima_cobranca','data_resolucao','observacoes']);
   const sets = []; const vals = []; let i = 1;
@@ -691,7 +742,7 @@ module.exports = {
   pool, init, scopedKey,
   saveNocFile, getLatestNocFile, listNocFiles, deleteNocFiles,
   registerDelivery, updateDeliveryStatus, getDeliveries, findDeliveryByExternalId,
-  getCameras, upsertCamera, updateCamera, deleteCamera,
+  getCameras, upsertCamera, upsertCamerasBulk, updateCamera, deleteCamera,
   addLog, getLog, hasRecentLog,
   getConversations, upsertConversation, incrementUnread, getMessages, addMessage, markRead,
   isBlocked, hasConsent, getConsents, setConsent, ensureConsent, block, unblock, getBlocklist,

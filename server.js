@@ -833,16 +833,25 @@ function createApp(options = {}) {
       const tenantId = req.tenantId || 'default';
       const { runNocDraftBot } = require('./lib/noc-import');
       const prepared = await runNocDraftBot({ db, tenantId, options: req.body || {} });
+      // Não devolve details/pending completos: com centenas de câmeras isso
+      // aumenta a resposta sem utilidade para o painel, que recarrega depois.
+      const sync = { ...prepared.sync };
+      delete sync.details;
       const result = {
-        ...prepared,
+        sourceFile: prepared.sourceFile,
         created: prepared.sync.created,
         updated: prepared.sync.updated,
         unchanged: prepared.sync.unchanged,
         semTelefone: prepared.sync.semTelefone,
+        drafts: prepared.drafts,
+        offline: prepared.offline,
+        errors: prepared.errors,
+        finishedAt: prepared.finishedAt,
+        sync,
+        assignments: prepared.assignments,
         sent: 0,
         failed: 0,
-        unconfirmed: 0,
-        pending: prepared.drafts
+        unconfirmed: 0
       };
       await db.addLog({
         timestamp: new Date().toISOString(),
