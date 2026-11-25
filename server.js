@@ -192,7 +192,10 @@ function createApp(options = {}) {
     res.set('Cache-Control', 'public, max-age=0');
     return res.sendFile(path.join(__dirname, 'phone-utils.js'));
   });
-  app.use('/painel-noc', express.static(path.join(__dirname, 'PAINEL NOC - CAMERAS OFFLINE')));
+  const painelNocDir = fs.existsSync(path.join(__dirname, 'PAINEL NOC - CAMERAS OFFLINE'))
+    ? path.join(__dirname, 'PAINEL NOC - CAMERAS OFFLINE')
+    : path.join(__dirname, 'painel-noc');
+  app.use('/painel-noc', express.static(painelNocDir));
   app.use((err, req, res, next) => {
     if (err && err.type === 'entity.parse.failed') {
       return res.status(400).json({ codigo: 'INVALID_JSON', erro: 'JSON invalido' });
