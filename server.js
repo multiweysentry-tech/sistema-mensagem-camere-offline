@@ -487,10 +487,12 @@ function createApp(options = {}) {
       const nome = String(info.configuredName || '');
       const idioma = String(info.configuredLanguage || 'pt_BR');
       const templates = (info.templates || []).map(item => ({
+        id: maskedId(item.id),
         name: String(item.name || ''),
         language: String(item.language || ''),
         status: String(item.status || ''),
-        category: String(item.category || '')
+        category: String(item.category || ''),
+        rejectedReason: String(item.rejectedReason || '')
       }));
       return res.json({
         ok: true,

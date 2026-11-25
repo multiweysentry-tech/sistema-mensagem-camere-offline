@@ -411,10 +411,12 @@ test('Datafy account endpoint checks the linked number without sending messages'
   assert.equal(templates.body.ok, true);
   assert.deepEqual(templates.body.configuredTemplate, { name: 'sentry_camera_offline', language: 'pt_BR' });
   assert.deepEqual(templates.body.match, {
+    id: null,
     name: 'sentry_camera_offline',
     language: 'pt_BR',
     status: 'PENDING',
-    category: 'UTILITY'
+    category: 'UTILITY',
+    rejectedReason: ''
   });
   assert.equal(templates.body.sameName.length, 2);
   assert.equal(templates.body.templates.length, 3);
