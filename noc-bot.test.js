@@ -124,3 +124,22 @@ test('scan NOC não grava e apply NOC cadastra contato sem disparar envio', asyn
   assert.equal(invalid.body.summary.applied, 0);
   assert.equal(invalid.body.summary.skipped, 1);
 });
+
+test('bot NOC aceita a relação completa do painel sem limite de 1 MB', async t => {
+  const { db, baseUrl } = await startServer(t);
+  const nomeLongo = 'CÂMERA DE MONITORAMENTO '.repeat(40);
+  const items = Array.from({ length: 1200 }, (_, i) => ({
+    id: String(20000 + i),
+    nome: `${nomeLongo} ${i}`,
+    municipio: 'Cuiabá',
+    status: 'Offline'
+  }));
+  const corpo = JSON.stringify({ items });
+  assert.ok(Buffer.byteLength(corpo, 'utf8') > 1024 * 1024, 'o teste precisa exceder 1 MB');
+
+  const bot = await jsonRequest(baseUrl, '/api/bots/noc/run', { items });
+  assert.equal(bot.status, 200);
+  assert.equal(bot.body.ok, true);
+  assert.equal(bot.body.result.drafts, 1200);
+  assert.equal(db.cameras.length, 1200);
+});

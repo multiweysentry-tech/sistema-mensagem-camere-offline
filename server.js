@@ -183,8 +183,16 @@ function createApp(options = {}) {
 
   const jsonParserDefault = express.json({ limit: '1mb' });
   const jsonParserLarge = express.json({ limit: '15mb' });
+  const rotasCorpoGrande = new Set([
+    '/api/import/pdf/scan',
+    '/api/noc/arquivos',
+    '/api/bots/noc/run',
+    '/api/import/noc',
+    '/api/import/noc/scan',
+    '/api/import/noc/apply'
+  ]);
   app.use((req, res, next) => {
-    if (req.path === '/api/import/pdf/scan' || req.path === '/api/noc/arquivos') return jsonParserLarge(req, res, next);
+    if (rotasCorpoGrande.has(req.path)) return jsonParserLarge(req, res, next);
     return jsonParserDefault(req, res, next);
   });
   app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
