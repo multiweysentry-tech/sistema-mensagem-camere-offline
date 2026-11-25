@@ -34,9 +34,29 @@ test('leitura de dados do painel tem botão, regexes válidas e texto íntegro',
   assert.match(gerado, /\[COLUNAS_ARMAZENAMENTO\.join\(';'\)/, 'cabeçalho do CSV salvo precisa usar ;');
   assert.ok(gerado.includes('(\\d{1,2})[/-](\\d{1,2})'), 'regex de data perdeu \\d');
   assert.ok(gerado.includes('\\s*[|;/•·]\\s*'), 'separador de responsáveis perdeu \\s');
-  assert.match(gerado, /XLSX\.read\(text, \{type:'string', FS: separador\}\)/, 'CSV não informa o separador ao XLSX');
+  assert.match(gerado, /function parseCsvLinhas\(texto, sep\)/, 'CSV precisa ser lido linha a linha');
+  assert.match(gerado, /MAX_CAMPO_CSV = 500/, 'campos do CSV precisam de limite de tamanho');
+  assert.match(gerado, /aspas = false; \/\/ nunca deixa aspas abertas/, 'linha com aspas soltas não pode engolir as próximas');
   assert.ok(!gerado.includes('c?meras'), 'mojibake em "câmeras"');
   assert.ok(!gerado.includes('atualiza??o'), 'mojibake em "atualização"');
+});
+
+test('CSV com aspas soltas não transforma várias linhas em um único nome', () => {
+  const inicio = template.indexOf('const MAX_CAMPO_CSV = 500;');
+  const fim = template.indexOf('async function processarLeitura(){', inicio);
+  assert.ok(inicio > 0 && fim > inicio, 'parser de CSV não encontrado no template');
+  const codigo = template.slice(inicio, fim);
+  const csv = [
+    'ID;Nome;Município;Responsável;Marcadores;Status;Último status;Tempo offline;Desconexões 24h;SLA 24h;SLA total',
+    '"1774";"NOVA XAVANTINA - CAM 39 - ESQUINA AV TERRA NOVA COM RUA ZERO "CASA MORTUÁRIA” Carazinho com Br 158";"NOVA XAVANTINA - MT";"Adeildo | JOÃO MACHADO NETO";"";"Online";"";"";"0";"100%";"100%"',
+    '"1775";"NOVA XAVANTINA - CAM 40 - Carazinho com Br 158";"NOVA XAVANTINA - MT";"Adeildo | JOÃO MACHADO NETO";"";"Offline";"";"";"0";"100%";"100%"'
+  ].join('\r\n');
+  const linhas = vm.runInNewContext(`${codigo}\nparseCsvLinhas(texto, ';')`, { texto: csv });
+  assert.equal(linhas.length, 3, 'as três linhas precisam continuar separadas');
+  assert.equal(linhas[1].length, 11);
+  assert.ok(linhas[1][1].length < 200, 'nome não pode virar um blob de milhões de caracteres');
+  assert.ok(linhas[1][1].includes('CASA MORTUÁRIA'));
+  assert.equal(linhas[2][0], '1775');
 });
 
 test('scripts inline do painel gerado e do template são JavaScript válido', () => {

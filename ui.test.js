@@ -63,6 +63,15 @@ test('painel oferece bot NOC para transformar offline em rascunhos, sem envio au
   assert.match(html, /Nenhuma mensagem enviada/);
 });
 
+test('painel limita campos vindos da API para não travar a interface', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  assert.match(html, /const limitarTexto=/);
+  assert.match(html, /camera_nome:limitarTexto\(c\.camera_nome\)/);
+  assert.match(html, /observacoes:limitarTexto\(c\.observacoes,1000\)/);
+  assert.match(html, /const visiveis=list\.slice\(0,150\)/);
+  assert.match(html, /\+\$\{list\.length-visiveis\.length\} ID\(s\)/);
+});
+
 test('painel separa responsáveis com o mesmo nome por telefone', () => {
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
   assert.match(html, /const respKeyFrom=/);

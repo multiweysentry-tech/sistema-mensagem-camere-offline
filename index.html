@@ -661,6 +661,40 @@ function linhaParaCamera(row, idx){
   };
 }
 
+/* CSV é lido linha a linha: uma aspas solta nunca pode fazer uma linha
+   engolir as seguintes (foi o que gerou um nome com 2,7 milhões de caracteres). */
+const MAX_CAMPO_CSV = 500;
+const limiteCampo = v => String(v ?? '').slice(0, MAX_CAMPO_CSV);
+function parseCsvLinhas(texto, sep){
+  const linhas = [];
+  let linha = [], campo = '', aspas = false;
+  const fechaCampo = () => { linha.push(campo); campo = ''; };
+  const fechaLinha = () => {
+    aspas = false; // nunca deixa aspas abertas atravessarem para a próxima linha
+    fechaCampo();
+    if(linha.length > 1 && linha.some(v => String(v).trim() !== '')) linhas.push(linha);
+    linha = [];
+  };
+  for(let i = 0; i < texto.length; i++){
+    const c = texto[i];
+    if(c === '"'){
+      if(aspas && texto[i + 1] === '"'){ campo += '"'; i++; }
+      else if(aspas) aspas = false;
+      else if(campo.trim() === '') aspas = true;
+      else campo += '"'; // aspas no meio do texto é conteúdo, não abertura
+    } else if(c === sep && !aspas){
+      fechaCampo();
+    } else if(c === '\n'){
+      fechaLinha();
+    } else if(c !== '\r'){
+      campo += c;
+      if(campo.length > MAX_CAMPO_CSV * 4) campo = campo.slice(0, MAX_CAMPO_CSV * 4);
+    }
+  }
+  if(campo !== '' || linha.length) fechaLinha();
+  return linhas;
+}
+
 async function processarLeitura(){
   const inp = $('arquivoLeitura');
   const file = inp && inp.files && inp.files[0];
@@ -678,14 +712,20 @@ async function processarLeitura(){
       const text = new TextDecoder('utf-8').decode(buf).replace(/^\uFEFF/,'');
       const primeiraLinha = text.split(/\r?\n/,1)[0] || '';
       const separador = (primeiraLinha.match(/;/g)||[]).length > (primeiraLinha.match(/,/g)||[]).length ? ';' : ',';
-      const wb = XLSX.read(text, {type:'string', FS: separador});
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      rows = XLSX.utils.sheet_to_json(ws, {defval:''});
+      const linhas = parseCsvLinhas(text, separador);
+      if(!linhas.length){ $('leituraStatus').textContent='Arquivo vazio ou formato não reconhecido.'; return; }
+      const cabecalho = linhas[0].map(h => String(h).trim().replace(/^\uFEFF/,''));
+      rows = linhas.slice(1).map(campos => {
+        const obj = {};
+        for(let i = 0; i < cabecalho.length; i++) obj[cabecalho[i] || ('COLUNA_' + (i + 1))] = limiteCampo(campos[i] ?? '');
+        return obj;
+      });
     } else {
       const wb = XLSX.read(buf, {type:'array'});
       const ws = wb.Sheets[wb.SheetNames[0]];
       rows = XLSX.utils.sheet_to_json(ws, {defval:''});
     }
+    rows = rows.map(r => Object.fromEntries(Object.entries(r).map(([k,v]) => [k, limiteCampo(v)])));
     if(!rows.length){ $('leituraStatus').textContent='Arquivo vazio ou formato não reconhecido.'; return; }
 
     const parsed = rows.map((r,i)=>linhaParaCamera(r,i)).filter(r=>r.nome || r.idTexto);
@@ -869,6 +909,9 @@ const respKeyFrom=(nome,telefone)=>{
  return k?`tel::${k}`:`nome::${respNome({responsavel_nome:nome})}::sem-telefone`;
 };
 const respKey=c=>respKeyFrom(c.responsavel_nome,c.responsavel_telefone);
+// Defesa final: nenhum campo vindo da API pode travar a interface, mesmo que
+// tenha sido salvo com tamanho absurdo por uma importação antiga.
+const limitarTexto=(valor,max=300)=>String(valor??"").slice(0,max);
 async function checkWaNumber(phone){const normal=PU.normalizarTelefone(phone);if(!normal.valido)return {exists:false,error:"DDD invalido"};try{return await apiRequest("/api/whatsapp/check/"+encodeURIComponent(normal.internacional))}catch(e){return {exists:null,error:e.message}}}
 async function apiRequest(url,options={}){
  const response=await fetch(url,{credentials:"same-origin",...options});
@@ -914,7 +957,19 @@ async function loadFromApi(){
     const health=await apiRequest('/api/health');
     storageMode=health.storage||"postgres";
     const mapSt = { 'Pendente':'offline','Aguardando resposta':'notificado','Verificando':'analisando','Suporte':'aguardando','Aguardando validacao':'validacao','Resolvido':'resolvido',offline:'offline',notificado:'notificado',analisando:'analisando',aguardando:'aguardando',validacao:'validacao',resolvido:'resolvido' };
-    cams = data.map(c=>Object.assign({since:c.ultima_cobranca?Date.parse(c.ultima_cobranca)||Date.now():Date.now(),resend:Number(c.tentativas)||0,deadline:c.ultima_cobranca?(Date.parse(c.ultima_cobranca)||Date.now())+24*H:Date.now()+24*H,doneAt:c.data_resolucao?Date.parse(c.data_resolucao)||0:0},c,{resp:respKey(c),nome:respNome(c),status:mapSt[c.status]||'offline'}));
+    cams = data.map(c=>{
+     const nome=limitarTexto(c.responsavel_nome),telefone=limitarTexto(c.responsavel_telefone,30);
+     return Object.assign({since:c.ultima_cobranca?Date.parse(c.ultima_cobranca)||Date.now():Date.now(),resend:Number(c.tentativas)||0,deadline:c.ultima_cobranca?(Date.parse(c.ultima_cobranca)||Date.now())+24*H:Date.now()+24*H,doneAt:c.data_resolucao?Date.parse(c.data_resolucao)||0:0},c,{
+      camera_nome:limitarTexto(c.camera_nome),
+      responsavel_nome:nome,
+      responsavel_telefone:telefone,
+      local:limitarTexto(c.local),
+      observacoes:limitarTexto(c.observacoes,1000),
+      resp:respKeyFrom(nome,telefone),
+      nome:respNome({responsavel_nome:nome}),
+      status:mapSt[c.status]||'offline'
+     });
+    });
     phones = {};
     for(const c of cams){
       if(!c.responsavel_telefone)continue;
@@ -1117,7 +1172,8 @@ const q=esc;
 function btn(cls,a,r,t){return `<button class="btn ${cls}" data-a="${a}" data-r="${q(r)}">${t}</button>`}
 function card(st,r,list){
  const entrega=deliveryBadge(list);
- const ids=list.map(c=>`<span class="chip">${esc(c.camera_nome||c.id)}</span>`).join("");
+ const visiveis=list.slice(0,150);
+ const ids=visiveis.map(c=>`<span class="chip">${esc(c.camera_nome||c.id)}</span>`).join("")+(list.length>visiveis.length?`<span class="chip">+${list.length-visiveis.length} ID(s)</span>`:"");
  const nomeCartao=list[0]?.nome||r;
  let head=`<div class="gh"><b>${esc(nomeCartao)}</b>${list[0]?.nomeDuplicado?`<span class="tag a">nome repetido · usuário separado</span>`:""}<span>${esc(phones[r]||"sem telefone")} · ${list.length} ${list.length>1?"câmeras":"câmera"}</span></div><div class="chips">${ids}</div>`,body="";
  if(st==="offline"){const old=Math.min(...list.map(c=>c.since)),recent=list.some(hasRecentAttempt);body=`<div class="act"><span class="tag r">offline ${ago(old).replace("há ","há ")}</span>${recent?`<span class="tag a">tentativa recente; verifique antes de reenviar</span>`:btn("p s","send",r,"Enviar WhatsApp")}${btn("s","editgroup",r,"Editar")}${btn("s","more",r,"+ Câmera")}</div>${nocEditState&&nocEditState.responsavel===r?groupEditor(r,list):""}`}

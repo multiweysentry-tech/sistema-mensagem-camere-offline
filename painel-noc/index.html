@@ -539,6 +539,40 @@ function linhaParaCamera(row, idx){
   };
 }
 
+/* CSV é lido linha a linha: uma aspas solta nunca pode fazer uma linha
+   engolir as seguintes (foi o que gerou um nome com 2,7 milhões de caracteres). */
+const MAX_CAMPO_CSV = 500;
+const limiteCampo = v => String(v ?? '').slice(0, MAX_CAMPO_CSV);
+function parseCsvLinhas(texto, sep){
+  const linhas = [];
+  let linha = [], campo = '', aspas = false;
+  const fechaCampo = () => { linha.push(campo); campo = ''; };
+  const fechaLinha = () => {
+    aspas = false; // nunca deixa aspas abertas atravessarem para a próxima linha
+    fechaCampo();
+    if(linha.length > 1 && linha.some(v => String(v).trim() !== '')) linhas.push(linha);
+    linha = [];
+  };
+  for(let i = 0; i < texto.length; i++){
+    const c = texto[i];
+    if(c === '"'){
+      if(aspas && texto[i + 1] === '"'){ campo += '"'; i++; }
+      else if(aspas) aspas = false;
+      else if(campo.trim() === '') aspas = true;
+      else campo += '"'; // aspas no meio do texto é conteúdo, não abertura
+    } else if(c === sep && !aspas){
+      fechaCampo();
+    } else if(c === '\n'){
+      fechaLinha();
+    } else if(c !== '\r'){
+      campo += c;
+      if(campo.length > MAX_CAMPO_CSV * 4) campo = campo.slice(0, MAX_CAMPO_CSV * 4);
+    }
+  }
+  if(campo !== '' || linha.length) fechaLinha();
+  return linhas;
+}
+
 async function processarLeitura(){
   const inp = $('arquivoLeitura');
   const file = inp && inp.files && inp.files[0];
@@ -556,14 +590,20 @@ async function processarLeitura(){
       const text = new TextDecoder('utf-8').decode(buf).replace(/^\uFEFF/,'');
       const primeiraLinha = text.split(/\r?\n/,1)[0] || '';
       const separador = (primeiraLinha.match(/;/g)||[]).length > (primeiraLinha.match(/,/g)||[]).length ? ';' : ',';
-      const wb = XLSX.read(text, {type:'string', FS: separador});
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      rows = XLSX.utils.sheet_to_json(ws, {defval:''});
+      const linhas = parseCsvLinhas(text, separador);
+      if(!linhas.length){ $('leituraStatus').textContent='Arquivo vazio ou formato não reconhecido.'; return; }
+      const cabecalho = linhas[0].map(h => String(h).trim().replace(/^\uFEFF/,''));
+      rows = linhas.slice(1).map(campos => {
+        const obj = {};
+        for(let i = 0; i < cabecalho.length; i++) obj[cabecalho[i] || ('COLUNA_' + (i + 1))] = limiteCampo(campos[i] ?? '');
+        return obj;
+      });
     } else {
       const wb = XLSX.read(buf, {type:'array'});
       const ws = wb.Sheets[wb.SheetNames[0]];
       rows = XLSX.utils.sheet_to_json(ws, {defval:''});
     }
+    rows = rows.map(r => Object.fromEntries(Object.entries(r).map(([k,v]) => [k, limiteCampo(v)])));
     if(!rows.length){ $('leituraStatus').textContent='Arquivo vazio ou formato não reconhecido.'; return; }
 
     const parsed = rows.map((r,i)=>linhaParaCamera(r,i)).filter(r=>r.nome || r.idTexto);

@@ -24,7 +24,10 @@ function detectSeparator(texto) {
   return semis >= virgulas ? ';' : ',';
 }
 
-/** Parser de CSV com aspas duplas, separador configurável e BOM. */
+/** Parser de CSV com aspas duplas, separador configurável e BOM.
+ *  Cada linha é um registro: uma aspas solta nunca pode engolir as próximas. */
+const MAX_CAMPO = 2000;
+
 function parseCSV(texto, separador) {
   const sep = separador || detectSeparator(texto);
   const fonte = String(texto || '').replace(/^\uFEFF/, '');
@@ -33,15 +36,20 @@ function parseCSV(texto, separador) {
 
   for (let i = 0; i < fonte.length; i++) {
     const c = fonte[i];
+    if (c === '\n') {
+      dentroAspas = false;
+      linha.push(campo); linhas.push(linha); linha = []; campo = '';
+      continue;
+    }
     if (dentroAspas) {
       if (c === '"') {
         if (fonte[i + 1] === '"') { campo += '"'; i++; }
         else dentroAspas = false;
       } else campo += c;
-    } else if (c === '"' && campo === '') dentroAspas = true;
+    } else if (c === '"' && campo.trim() === '') dentroAspas = true;
     else if (c === sep) { linha.push(campo); campo = ''; }
-    else if (c === '\n') { linha.push(campo); linhas.push(linha); linha = []; campo = ''; }
     else if (c !== '\r') campo += c;
+    if (campo.length > MAX_CAMPO) campo = campo.slice(0, MAX_CAMPO);
   }
   if (campo !== '' || linha.length) { linha.push(campo); linhas.push(linha); }
   return linhas.filter(r => r.length > 1 && r.some(v => String(v).trim() !== ''));
@@ -143,7 +151,7 @@ function normalizar(linhas, opcoes = {}) {
     const valor = indice => indice >= 0 ? limpar(linha[indice]) : '';
     const id = valor(colunas.id);
     const idTexto = id; // preserva zeros à esquerda e IDs acima de 2^53
-    const nome = valor(colunas.nome);
+    const nome = valor(colunas.nome).slice(0, 500);
     const municipioBruto = valor(colunas.municipio);
     if (!id || !nome) {
       erros.push(`Linha ${i + 1}: ID e Nome são obrigatórios (registro ignorado)`);

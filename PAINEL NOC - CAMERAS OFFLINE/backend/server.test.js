@@ -183,6 +183,17 @@ test('regressões de segurança e consistência', async t => {
     );
   });
 
+  await t.test('aspas soltas não fazem uma linha engolir as seguintes', () => {
+    const linhas = noc.parseCSV([
+      'ID;Nome;Município;Status',
+      '"1774";"NOVA XAVANTINA - CAM 39 - ZERO "CASA MORTUÁRIA” Carazinho";"NOVA XAVANTINA - MT";"Offline"',
+      '"1775";"NOVA XAVANTINA - CAM 40";"NOVA XAVANTINA - MT";"Offline"'
+    ].join('\r\n'));
+    assert.equal(linhas.length, 3);
+    assert.ok(linhas[1][1].length < 200);
+    assert.equal(linhas[2][0], '1775');
+  });
+
   await t.test('gerar a partir de CSV externo não envenena o cache', () => {
     const raiz = criarTemporario();
     t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
