@@ -205,7 +205,7 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
               camera_nome: group.cameras.map(camera => camera.camera_nome).join(', '),
               responsavel_telefone: group.phone,
               acao: 'ENVIO_AGUARDANDO_CONFIRMACAO',
-              detalhe: `Mensagem ${result.id || 'sem ID'} aceita pela Cloud API; aguardando confirmação de entrega`,
+              detalhe: `Mensagem ${result.id || 'sem ID'} aceita pela Cloud API (modo=${result.modoEnvio || 'desconhecido'}); aguardando confirmação de entrega`,
               status_anterior: group.cameras.map(camera => camera.status).join(','),
               status_novo: group.cameras.map(camera => camera.status).join(','),
               instance_id: instanceId
@@ -313,7 +313,7 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
               camera_nome: group.cameras.map(camera => camera.camera_nome).join(', '),
               responsavel_telefone: group.phone,
               acao: 'ENVIO_AGUARDANDO_CONFIRMACAO',
-              detalhe: `Lembrete ${result.id || 'sem ID'} aceito pela Cloud API; aguardando confirmação de entrega`,
+              detalhe: `Lembrete ${result.id || 'sem ID'} aceito pela Cloud API (modo=${result.modoEnvio || 'desconhecido'}); aguardando confirmação de entrega`,
               status_anterior: 'Pendente',
               status_novo: 'Pendente',
               instance_id: instanceId
