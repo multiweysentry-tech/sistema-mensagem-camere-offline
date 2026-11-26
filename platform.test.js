@@ -242,6 +242,20 @@ test('scopedKey mantem tenant padrao e isola os demais', () => {
   assert.equal(scopedKey(null, 'tenant-a'), null);
 });
 
+test('schema legado do log recebe a coluna trace_id na inicialização', () => {
+  const dbSource = fs.readFileSync(path.join(__dirname, 'db.js'), 'utf8');
+  const initBody = dbSource.slice(
+    dbSource.indexOf('async function init()'),
+    dbSource.indexOf('async function getCameras')
+  );
+
+  assert.match(dbSource, /CREATE TABLE IF NOT EXISTS log \([\s\S]*?trace_id TEXT/);
+  assert.match(dbSource, /INSERT INTO log \([\s\S]*?trace_id\)/);
+  const alterIndex = initBody.indexOf('ALTER TABLE log ADD COLUMN IF NOT EXISTS trace_id');
+  const schemaIndex = initBody.indexOf('CREATE TABLE IF NOT EXISTS log');
+  assert.ok(schemaIndex >= 0 && alterIndex > schemaIndex, 'a migration precisa rodar na init()');
+});
+
 test('modulos da plataforma compilam sem erros de sintaxe', () => {
   const files = [
     'auth.js', 'db.js', 'db-memory.js', 'logger.js', 'queue.js',

@@ -130,6 +130,9 @@ async function init() {
   // Bancos criados antes do suporte a status de entrega nao tinham esta coluna.
   await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending'");
   await pool.query("UPDATE messages SET status = 'pending' WHERE status IS NULL");
+  // O CREATE TABLE IF NOT EXISTS nao altera tabelas ja existentes: sem esta
+  // migration, qualquer addLog() falha com "column trace_id ... does not exist".
+  await pool.query('ALTER TABLE log ADD COLUMN IF NOT EXISTS trace_id TEXT');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_cameras_tenant ON cameras(tenant_id, status)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_log_tenant_action ON log(tenant_id, acao, timestamp)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_tenant_time ON messages(tenant_id, time)');
