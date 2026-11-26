@@ -127,6 +127,9 @@ async function init() {
   for (const table of ['cameras', 'log', 'conversations', 'messages']) {
     await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS instance_id TEXT NOT NULL DEFAULT 'default'`);
   }
+  // Bancos criados antes do suporte a status de entrega nao tinham esta coluna.
+  await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending'");
+  await pool.query("UPDATE messages SET status = 'pending' WHERE status IS NULL");
   await pool.query('CREATE INDEX IF NOT EXISTS idx_cameras_tenant ON cameras(tenant_id, status)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_log_tenant_action ON log(tenant_id, acao, timestamp)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_tenant_time ON messages(tenant_id, time)');
