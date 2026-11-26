@@ -256,6 +256,13 @@ test('schema legado do log recebe a coluna trace_id na inicialização', () => {
   assert.ok(schemaIndex >= 0 && alterIndex > schemaIndex, 'a migration precisa rodar na init()');
 });
 
+test('Vercel processa respostas do WhatsApp sem ligar agendamentos', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'api', 'index.js'), 'utf8');
+  assert.match(source, /createBots\(\{ db, wa, resolveWa: \(\) => wa \}\)/);
+  assert.match(source, /bots\.onIncomingMessage\s*=\s*incomingBots\.onIncomingMessage/);
+  assert.match(source, /startSchedulers:\s*async \(\) => \{\}/);
+});
+
 test('modulos da plataforma compilam sem erros de sintaxe', () => {
   const files = [
     'auth.js', 'db.js', 'db-memory.js', 'logger.js', 'queue.js',

@@ -380,6 +380,11 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
     const action = parseReply(text);
     const cameras = (await db.getCameras(tenantId))
       .filter(camera => contactKey(camera.responsavel_telefone) === key);
+    // O JID recebido pode vir sem o 9º digito; responda pelo numero cadastrado
+    // quando disponivel para nao perder a mensagem no provedor.
+    const replyPhone = cameras.length
+      ? (normalizePhone(cameras[0].responsavel_telefone) || phone)
+      : phone;
     const phones = [...new Set([
       phone,
       ...cameras.map(camera => normalizePhone(camera.responsavel_telefone)).filter(Boolean)
@@ -390,7 +395,7 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
         await db.setConsent(target, false, tenantId);
         await db.block(target, 'Opt-out solicitado por WhatsApp', tenantId);
       }
-      await instance.sendMessage(phone, 'Tudo certo. Voce nao recebera mais mensagens automaticas. Para voltar a receber, entre em contato com a equipe.');
+      await instance.sendMessage(replyPhone, 'Tudo certo. Voce nao recebera mais mensagens automaticas. Para voltar a receber, entre em contato com a equipe.');
       return;
     }
 
@@ -429,7 +434,7 @@ function createBots({ db = defaultDb, wa = defaultWa, schedulerApi = cron, resol
       }, tenantId);
     }
 
-    if (action.reply && config.auto_mode !== 'false') await instance.sendMessage(phone, action.reply);
+    if (action.reply && config.auto_mode !== 'false') await instance.sendMessage(replyPhone, action.reply);
   }
 
   async function startSchedulers() {

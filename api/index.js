@@ -170,6 +170,13 @@ try {
     runBillingBot: async () => { throw unavailable('Bots'); },
     runMaintenanceBot: async () => { throw unavailable('Bots'); }
   };
+
+  // O webhook da Datafy/Meta precisa processar as respostas dos botoes.
+  // Mantemos os agendamentos desativados no Vercel, mas ligamos somente o
+  // tratamento de mensagens recebidas.
+  const { createBots } = require('../bots');
+  const incomingBots = createBots({ db, wa, resolveWa: () => wa });
+  bots.onIncomingMessage = incomingBots.onIncomingMessage;
 } catch (error) {
   // Captura falhas de importacao para nao virar um FUNCTION_INVOCATION_FAILED opaco.
   loadError = error;

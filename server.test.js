@@ -715,6 +715,17 @@ test('incoming WhatsApp choices update only matching cameras and parse common re
   assert.equal(localHour(new Date('2026-11-16T13:00:00.000Z')), 9);
 });
 
+test('incoming WhatsApp reply uses the registered phone when the JID drops the 9th digit', async t => {
+  const cameraWithNinthDigit = { ...camera, id: 'CAM-9002', responsavel_telefone: '5565981130338' };
+  const { db, wa, bots } = await startServer(t, [cameraWithNinthDigit]);
+  await wa.connect();
+
+  await bots.onIncomingMessage('556581130338@s.whatsapp.net', '3');
+
+  assert.equal((await db.getCameras())[0].status, 'Aguardando validacao');
+  assert.equal(wa.sent[0].to, '5565981130338');
+});
+
 test('manual bots ignore automatic mode and can run outside business hours', async t => {
   const { baseUrl, db, wa } = await startServer(t, [camera]);
   await db.setConsent(camera.responsavel_telefone, true);
