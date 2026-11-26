@@ -11,6 +11,7 @@ const template = ler(path.join(dirPainel, 'painel-template.html'));
 const espelho = ler(path.join(__dirname, 'painel-noc', 'index.html'));
 const app = ler(path.join(__dirname, 'index.html'));
 const appSync = require(path.join(dirPainel, 'backend', 'app-sync.js'));
+const noc = require(path.join(dirPainel, 'backend', 'noc-data.js'));
 
 test('template do painel é a fonte da versão gerada e do espelho', () => {
   assert.match(template, /const PAYLOAD = \/\*__DATA__\*\/null;/);
@@ -57,6 +58,20 @@ test('CSV com aspas soltas não transforma várias linhas em um único nome', ()
   assert.ok(linhas[1][1].length < 200, 'nome não pode virar um blob de milhões de caracteres');
   assert.ok(linhas[1][1].includes('CASA MORTUÁRIA'));
   assert.equal(linhas[2][0], '1775');
+});
+
+test('CSV com apenas cabecalho gera painel zerado sem erros', () => {
+  const csv = 'ID;Nome;Município;Responsável;Marcadores;Status;Último status;Tempo offline;Desconexões 24h;SLA 24h;SLA total';
+  const payload = noc.construirPayload(csv, {
+    arquivoFonte: 'noc-original.csv',
+    geradoEm: '25/11/2026, 03:37:08'
+  });
+  assert.deepEqual(payload.data, []);
+  assert.deepEqual(payload.resumoMunicipios, []);
+  assert.deepEqual(payload.erros, []);
+  assert.equal(payload.stats.total, 0);
+  assert.equal(payload.stats.slaMedio, 0);
+  assert.equal(payload.stats.geradoEm, '25/11/2026, 03:37:08');
 });
 
 test('scripts inline do painel gerado e do template são JavaScript válido', () => {

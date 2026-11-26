@@ -149,8 +149,8 @@ function severidadeDe(camera) {
  * @returns {{stats:object, data:Array, resumoMunicipios:Array, erros:string[]}}
  */
 function normalizar(linhas, opcoes = {}) {
-  if (!Array.isArray(linhas) || linhas.length < 2) {
-    throw new Error('CSV vazio ou sem linhas de dados');
+  if (!Array.isArray(linhas) || linhas.length < 1) {
+    throw new Error('CSV vazio ou sem cabecalho');
   }
   const colunas = mapearColunas(linhas[0]);
   validarCabecalho(colunas);
@@ -204,7 +204,9 @@ function normalizar(linhas, opcoes = {}) {
       slaTotal: parseInt(slaTotal, 10) || 0,
     });
   }
-  if (!data.length) throw new Error('Nenhuma câmera válida encontrada no CSV');
+  // Um CSV com apenas o cabecalho e valido: representa o painel limpo, pronto
+  // para receber os dados reais. Se ha linhas, pelo menos uma deve ser valida.
+  if (!data.length && linhas.length > 1) throw new Error('Nenhuma câmera válida encontrada no CSV');
 
   const porMunicipio = {};
   for (const d of data) {
@@ -235,7 +237,7 @@ function normalizar(linhas, opcoes = {}) {
     mais24h: offline.filter(d => d.offlineMin >= 1440).length,
     mais7d: offline.filter(d => d.offlineMin >= 10080).length,
     desc24Total: data.reduce((soma, d) => soma + d.desc24, 0),
-    slaMedio: Math.round(data.reduce((soma, d) => soma + d.slaTotal, 0) / data.length),
+    slaMedio: data.length ? Math.round(data.reduce((soma, d) => soma + d.slaTotal, 0) / data.length) : 0,
     geradoEm: opcoes.geradoEm || new Date().toLocaleString('pt-BR'),
     arquivoFonte: opcoes.arquivoFonte || 'noc-original.csv',
   };
