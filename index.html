@@ -1270,7 +1270,7 @@ async function sendGroupMessage(resp){
    const entrega={id:result.id||`fila_${Date.now()}`,cameraIds:group.map(c=>c.id),status:"pendente",statusExibido:"pendente",createdAt:timestamp};
    deliveries[entrega.id]=entrega;
    for(const camera of group){deliveryByCamera[camera.id]=entrega;await apiRequest(`/api/cameras/${encodeURIComponent(camera.id)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({ultima_cobranca:timestamp})})}
-   await apiRequest("/api/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({timestamp,camera_id:group.map(c=>c.id).join(","),camera_nome:group.map(c=>c.camera_nome).join(", "),responsavel_telefone:phone,acao:"ENVIO_AGUARDANDO_CONFIRMACAO",detalhe:`Mensagem ${entrega.id} enfileirada; status real virá pelo webhook.`,status_anterior:[...new Set(group.map(c=>c.status))].join(","),status_novo:[...new Set(group.map(c=>c.status))].join(",")})});
+   await apiRequest("/api/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({timestamp,camera_id:group.map(c=>c.id).join(","),camera_nome:group.map(c=>c.camera_nome).join(", "),responsavel_telefone:phone,acao:"ENVIO_AGUARDANDO_CONFIRMACAO",detalhe:`Mensagem ${entrega.id} enfileirada (modo=${result.modoEnvio||"desconhecido"}); status real virá pelo webhook.`,status_anterior:[...new Set(group.map(c=>c.status))].join(","),status_novo:[...new Set(group.map(c=>c.status))].join(",")})});
    await Promise.allSettled([loadFromApi(),loadDeliveries()]);
    return result;
   }
