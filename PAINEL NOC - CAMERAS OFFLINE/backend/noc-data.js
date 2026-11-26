@@ -77,7 +77,19 @@ function mapearColunas(cabecalho) {
     desc24: escolher('Desconexões 24h', 'Desconexoes 24h', 'Desconexoes', 'Desc. 24h'),
     sla24: escolher('SLA 24h'),
     slaTotal: escolher('SLA total', 'SLA Total'),
+    dataResolucao: escolher('Data resolução', 'Data resolucao', 'Data da resolução', 'Data da resolucao'),
+    observacao: escolher('Observação', 'Observacao', 'Observações', 'Observacoes'),
   };
+}
+
+function parseStatus(v) {
+  const s = normKey(v);
+  if (!s) return 'Offline';
+  if (s.includes('RESOLVID') || s.includes('BAIXAD') || s.includes('CONCLUÍD') || s.includes('CONCLUID')) return 'Resolvido';
+  if (s.includes('ONLINE') && !s.includes('OFFLINE')) return 'Online';
+  if (s.includes('OFFLINE')) return 'Offline';
+  if (s.includes('ATIVO') || s.includes('UP')) return 'Online';
+  return 'Offline';
 }
 
 function validarCabecalho(colunas) {
@@ -128,7 +140,7 @@ const SEVERIDADES = [
 ];
 
 function severidadeDe(camera) {
-  if (!camera || camera.status === 'Online') return null;
+  if (!camera || camera.status === 'Online' || camera.status === 'Resolvido') return null;
   return SEVERIDADES.find(s => camera.offlineMin >= s.min && camera.offlineMin < s.max) || null;
 }
 
@@ -164,7 +176,7 @@ function normalizar(linhas, opcoes = {}) {
     if (!anterior || (temAcento && !anterior.temAcento)) {
       munDisplay.set(key, { name: municipio, temAcento });
     }
-    const status = valor(colunas.status);
+    const status = parseStatus(valor(colunas.status));
     const tempo = valor(colunas.tempo);
     const sla24 = valor(colunas.sla24);
     const slaTotal = valor(colunas.slaTotal);
@@ -181,10 +193,12 @@ function normalizar(linhas, opcoes = {}) {
       marcadores: valor(colunas.marcadores),
       categoria: categoriaDe(nome, valor(colunas.marcadores)),
       status,
+      dataResolucao: valor(colunas.dataResolucao),
+      observacao: valor(colunas.observacao),
       ultimo,
       ultimoTs: parseDate(ultimo),
       offlineMin: parseOfflineMinutes(tempo),
-      offlineStr: tempo || (status === 'Online' ? '—' : 'agora'),
+      offlineStr: status === 'Online' ? 'Online' : (status === 'Resolvido' ? '' : (tempo || 'agora')),
       desc24: Number(valor(colunas.desc24)) || 0,
       sla24: parseInt(sla24, 10) || 0,
       slaTotal: parseInt(slaTotal, 10) || 0,
@@ -200,7 +214,7 @@ function normalizar(linhas, opcoes = {}) {
     m.total++;
     m.desc24 += d.desc24;
     m.slaSoma += d.slaTotal;
-    if (d.status !== 'Online') {
+    if (d.status !== 'Online' && d.status !== 'Resolvido') {
       m.offline++;
       m.maxOfflineMin = Math.max(m.maxOfflineMin, d.offlineMin);
     }
@@ -209,11 +223,13 @@ function normalizar(linhas, opcoes = {}) {
     .map(([nome, m]) => ({ municipio: nome, ...m, slaMedio: Math.round(m.slaSoma / m.total) }))
     .sort((a, b) => b.offline - a.offline || a.municipio.localeCompare(b.municipio, 'pt-BR'));
 
-  const offline = data.filter(d => d.status !== 'Online');
+  const offline = data.filter(d => d.status !== 'Online' && d.status !== 'Resolvido');
+  const resolvidos = data.filter(d => d.status === 'Resolvido');
   const stats = {
     total: data.length,
     offline: offline.length,
-    online: data.length - offline.length,
+    online: data.filter(d => d.status === 'Online').length,
+    resolvidos: resolvidos.length,
     municipios: Object.keys(porMunicipio).length,
     municipiosAfetados: resumoMunicipios.filter(m => m.offline > 0).length,
     mais24h: offline.filter(d => d.offlineMin >= 1440).length,
@@ -271,12 +287,13 @@ function filtrar(data, filtros = {}) {
 }
 
 function csvOrganizado(payload) {
-  const cabecalho = 'ID;Nome;Município;Categoria;Responsável;Marcadores;Status;Último status;Tempo offline;Minutos offline;Desconexões 24h;SLA 24h;SLA total';
+  const cabecalho = 'ID;Nome;Município;Categoria;Responsável;Marcadores;Status;Data resolução;Observação;Último status;Tempo offline;Minutos offline;Desconexões 24h;SLA 24h;SLA total';
   const linhas = [...payload.data].sort((a, b) =>
     a.municipio.localeCompare(b.municipio, 'pt-BR') || b.offlineMin - a.offlineMin || Number(a.id) - Number(b.id)
   ).map(d => [
     d.idTexto, d.nome, d.municipio, d.categoria, d.responsaveis.join(' | '), d.marcadores, d.status,
-    d.ultimo, d.offlineStr, d.offlineMin, d.desc24, `${d.sla24}%`, `${d.slaTotal}%`,
+    d.dataResolucao || '', d.observacao || '', d.ultimo, d.offlineStr, d.offlineMin, d.desc24,
+    `${d.sla24}%`, `${d.slaTotal}%`,
   ]);
   return [cabecalho, ...linhas.map(linha => linha.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(';'))].join('\r\n');
 }
@@ -289,10 +306,10 @@ function csvResumo(payload) {
 }
 
 function csvFiltrado(itens) {
-  const cabecalho = 'ID;Nome;Município;Categoria;Responsáveis;Marcadores;Status;Último status;Tempo offline;Desconexões 24h;SLA 24h;SLA total';
+  const cabecalho = 'ID;Nome;Município;Categoria;Responsáveis;Marcadores;Status;Data resolução;Observação;Último status;Tempo offline;Desconexões 24h;SLA 24h;SLA total';
   const linhas = itens.map(d => [
     d.idTexto, d.nome, d.municipio, d.categoria, d.responsaveis.join(' | '), d.marcadores, d.status,
-    d.ultimo, d.offlineStr, d.desc24, `${d.sla24}%`, `${d.slaTotal}%`,
+    d.dataResolucao || '', d.observacao || '', d.ultimo, d.offlineStr, d.desc24, `${d.sla24}%`, `${d.slaTotal}%`,
   ]);
   return [cabecalho, ...linhas.map(linha => linha.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(';'))].join('\r\n');
 }

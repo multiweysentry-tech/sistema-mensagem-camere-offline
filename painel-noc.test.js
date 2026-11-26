@@ -81,3 +81,152 @@ test('view nativa executa todos os scripts e carrega dependências externas', ()
   assert.match(app, /new CustomEvent\("noc:payload"/);
   assert.match(gerado, /window\.__nocXlsxPromise/);
 });
+
+test('painel NOC oferece baixa, agrupamento e dedupe sem duplicar regra de telefone', () => {
+  for (const [nome, html] of [['template', template], ['gerado', gerado], ['embutido', app]]) {
+    assert.match(html, /id="btnDarBaixa"/, `${nome}: falta botão de dar baixa`);
+    assert.match(html, /function darBaixa\(ids, observacao\)/, `${nome}: falta darBaixa()`);
+    assert.match(html, /new CustomEvent\('noc:baixa'/, `${nome}: falta evento noc:baixa`);
+    assert.match(html, /id="btnAgrupar"/, `${nome}: falta botão de agrupar`);
+    assert.match(html, /function agruparIdsEmResponsavel\(\)/, `${nome}: falta agrupamento`);
+    assert.match(html, /groups:\[\{responsavel_nome:nome/, `${nome}: falta groups[]`);
+    assert.match(html, /function filtrarLinhasLidas\(lidas\)/, `${nome}: falta dedupe do anexo`);
+    assert.match(html, /ignoradasCadastradas\+\+/, `${nome}: falta contagem de IDs cadastradas`);
+    assert.match(html, /Data resolução/, `${nome}: falta coluna de data da baixa`);
+    assert.match(html, /Observação/, `${nome}: falta coluna de observação`);
+    assert.doesNotMatch(html, /replace\(\/\\D\/g/, `${nome}: regra de telefone duplicada`);
+  }
+  assert.match(template, /<script src="\/phone-utils\.js"><\/script>/);
+  assert.match(template, /function chaveTelefone\(v\)/);
+});
+
+test('darBaixa altera só o status para Resolvido e registra data e observação', () => {
+  const inicioStats = template.indexOf('function calcularStats(arr, meta={})');
+  const fimStats = template.indexOf('function renderDashboard(){', inicioStats);
+  const inicioAcao = template.indexOf('function atualizarDepoisDeAcao(mensagem){');
+  const fimAcao = template.indexOf('function popularResponsaveisAgrupamento(){', inicioAcao);
+  assert.ok(inicioStats > 0 && fimStats > inicioStats && inicioAcao > 0 && fimAcao > inicioAcao);
+  const codigo = template.slice(inicioStats, fimStats) + '\n' + template.slice(inicioAcao, fimAcao);
+
+  const eventos = [];
+  const elementos = {};
+  const ctx = {
+    window: { dispatchEvent: evento => eventos.push(evento) },
+    document: { getElementById: () => null },
+    CustomEvent: function CustomEvent(tipo, init) {
+      this.type = tipo;
+      this.detail = init && init.detail;
+    },
+    $: id => {
+      if (!elementos[id]) {
+        elementos[id] = { textContent: '', innerHTML: '', classList: { contains: () => false } };
+      }
+      return elementos[id];
+    },
+    norm: s => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim(),
+    pendente: d => Boolean(d) && d.status !== 'Online' && d.status !== 'Resolvido',
+    chaveId: v => String(v ?? '').replace(/^NOC-/i, '').replace(/[^A-Z0-9]/g, ''),
+    MAX_CAMPO_CSV: 500,
+    stats: { geradoEm: '25/11/2026, 03:37:08', arquivoFonte: 'noc-original.csv' },
+    PAYLOAD: null,
+    data: [
+      { id: 123, idTexto: '123', municipio: 'Cuiabá', status: 'Offline', offlineMin: 120, desc24: 0, slaTotal: 50 },
+      { id: 456, idTexto: '456', municipio: 'Sinop', status: 'Online', offlineMin: 0, desc24: 0, slaTotal: 100 },
+      { id: 789, idTexto: '789', municipio: 'Sinop', status: 'Resolvido', offlineMin: 40, desc24: 0, slaTotal: 80 }
+    ],
+    renderRenderizado: 0,
+    renderDashboard() { ctx.renderRenderizado++; },
+    mostrar() {},
+    prepararLeituraParaSalvar() {}
+  };
+  ctx.PAYLOAD = { stats: ctx.stats, data: ctx.data, resumoMunicipios: [] };
+  vm.runInNewContext(codigo, ctx);
+
+  assert.equal(ctx.darBaixa(['NOC-123'], 'Troca concluída'), 1);
+  assert.equal(ctx.data[0].status, 'Resolvido');
+  assert.match(ctx.data[0].dataResolucao, /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(ctx.data[0].observacao, /Troca concluída/);
+  assert.equal(ctx.data[0].offlineMin, 0);
+  assert.equal(ctx.data[1].status, 'Online', 'câmera online não pode ser alterada');
+  assert.equal(ctx.data[1].observacao, undefined);
+  assert.equal(ctx.data[2].status, 'Resolvido', 'câmera já resolvida não pode ser reaberta');
+  assert.equal(ctx.PAYLOAD.stats.offline, 0);
+  assert.equal(ctx.PAYLOAD.stats.resolvidos, 2);
+  assert.equal(eventos.length, 1);
+  assert.equal(eventos[0].type, 'noc:baixa');
+  assert.deepEqual(Array.from(eventos[0].detail.ids), ['123']);
+  assert.equal(eventos[0].detail.observacao, 'Troca concluída');
+  assert.ok(ctx.renderRenderizado > 0, 'dashboard precisa ser recalculado após a baixa');
+});
+
+test('agruparIdsEmResponsavel envia groups[] ao Offline e não dispara WhatsApp', () => {
+  const inicio = template.indexOf('function itensOffline(){');
+  const fim = template.indexOf('async function carregarIdsCadastradas(){', inicio);
+  assert.ok(inicio > 0 && fim > inicio);
+  const codigo = template.slice(inicio, fim);
+
+  const eventos = [];
+  const campos = {
+    agruparIds: { value: '123; NOC-456; 999' },
+    agruparResponsavel: { selectedOptions: [] },
+    agruparNome: { value: 'Novo Responsável' },
+    agruparTelefone: { value: '(65) 99999-8888' },
+    agruparStatus: { textContent: '' }
+  };
+  let atualizado = false, fechado = false;
+  const ctx = {
+    window: { dispatchEvent: evento => eventos.push(evento) },
+    CustomEvent: function CustomEvent(tipo, init) {
+      this.type = tipo;
+      this.detail = init && init.detail;
+    },
+    $: id => campos[id],
+    pendente: d => Boolean(d) && d.status !== 'Online' && d.status !== 'Resolvido',
+    chaveId: v => String(v ?? '').replace(/^NOC-/i, '').replace(/[^A-Z0-9]/g, ''),
+    data: [
+      { idTexto: '123', status: 'Offline', responsaveis: ['Antigo'], municipio: 'Cuiabá' },
+      { idTexto: '456', status: 'Offline', responsaveis: ['Antigo'], municipio: 'Sinop' },
+      { idTexto: '789', status: 'Resolvido', responsaveis: ['Intocável'], municipio: 'Sinop' }
+    ],
+    atualizarDepoisDeAcao() { atualizado = true; },
+    fecharAgrupar() { fechado = true; }
+  };
+  vm.runInNewContext(codigo, ctx);
+
+  ctx.agruparIdsEmResponsavel();
+
+  assert.equal(atualizado, true);
+  assert.equal(fechado, true);
+  assert.deepEqual(Array.from(ctx.data[0].responsaveis), ['Novo Responsável']);
+  assert.deepEqual(Array.from(ctx.data[1].responsaveis), ['Novo Responsável']);
+  assert.deepEqual(Array.from(ctx.data[2].responsaveis), ['Intocável'], 'resolvido não entra no grupo');
+  assert.equal(eventos.length, 1);
+  assert.equal(eventos[0].type, 'noc:offline');
+  const grupo = eventos[0].detail.groups[0];
+  assert.equal(grupo.responsavel_nome, 'Novo Responsável');
+  assert.equal(grupo.responsavel_telefone, '(65) 99999-8888');
+  assert.deepEqual(Array.from(grupo.cameraIds), ['123', 'NOC-456', '999']);
+  assert.deepEqual(Array.from(eventos[0].detail.items.map(item => item.id)), ['123', '456']);
+  assert.equal(eventos.some(evento => /whatsapp/i.test(evento.type)), false);
+});
+
+test('anexo do painel ignora IDs já cadastradas e IDs repetidas', () => {
+  const inicio = template.indexOf('function filtrarLinhasLidas(lidas){');
+  const fim = template.indexOf('/* ---------- Export CSV ---------- */', inicio);
+  assert.ok(inicio > 0 && fim > inicio);
+  const ctx = {
+    idsCadastradas: new Set(['123']),
+    chaveId: v => String(v ?? '').replace(/^NOC-/i, '').replace(/[^A-Z0-9]/g, '')
+  };
+  vm.runInNewContext(template.slice(inicio, fim), ctx);
+
+  const resultado = ctx.filtrarLinhasLidas([
+    { idTexto: '123', nome: 'Já cadastrada' },
+    { idTexto: '456', nome: 'Nova' },
+    { idTexto: 'NOC-456', nome: 'Repetida no arquivo' },
+    { idTexto: '789', nome: 'Outra nova' }
+  ]);
+  assert.deepEqual(Array.from(resultado.parsed.map(item => item.idTexto)), ['456', '789']);
+  assert.equal(resultado.ignoradasCadastradas, 1);
+  assert.equal(resultado.duplicadasNoArquivo, 1);
+});

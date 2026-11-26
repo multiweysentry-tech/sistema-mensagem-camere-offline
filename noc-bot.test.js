@@ -125,6 +125,57 @@ test('scan NOC não grava e apply NOC cadastra contato sem disparar envio', asyn
   assert.equal(invalid.body.summary.skipped, 1);
 });
 
+test('bot NOC aplica groups[] do painel ao Offline sem enviar WhatsApp', async t => {
+  const { db, baseUrl } = await startServer(t);
+  const bot = await jsonRequest(baseUrl, '/api/bots/noc/run', {
+    items: [{ id: '9100', nome: 'CAM 9100', municipio: 'Cuiabá', status: 'Offline' }],
+    groups: [{
+      responsavel_nome: 'João',
+      responsavel_telefone: '(65) 99999-8888',
+      cameraIds: ['9100', '9101']
+    }]
+  });
+
+  assert.equal(bot.status, 200);
+  assert.equal(bot.body.ok, true);
+  assert.equal(bot.body.result.grupos.aplicadas, 1);
+  assert.equal(bot.body.result.grupos.ignoradas, 1, 'ID inexistente precisa ser ignorada');
+  assert.equal(bot.body.result.sent, 0);
+  assert.equal(db.cameras.length, 1);
+  assert.equal(db.cameras[0].id, 'NOC-9100');
+  assert.equal(db.cameras[0].responsavel_nome, 'João');
+  assert.equal(db.cameras[0].responsavel_telefone, '5565999998888');
+});
+
+test('baixa do Painel NOC persiste status, data e observação via atualização em lote', async t => {
+  const { db, baseUrl } = await startServer(t);
+  db.cameras.push({
+    id: 'NOC-9200', camera_nome: 'CAM 9200', local: 'Cuiabá',
+    responsavel_nome: 'João', responsavel_telefone: '556599998888',
+    status: 'Aguardando resposta', tentativas: 1, ultima_cobranca: '2026-11-25',
+    data_resolucao: '', observacoes: ''
+  });
+
+  const resposta = await fetch(`${baseUrl}/api/cameras/bulk`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ids: ['NOC-9200'],
+      fields: {
+        status: 'Resolvido',
+        data_resolucao: '2026-11-26',
+        observacoes: 'Baixa dada no Painel NOC'
+      }
+    })
+  });
+
+  assert.equal(resposta.status, 200);
+  assert.equal((await resposta.json()).atualizadas, 1);
+  assert.equal(db.cameras[0].status, 'Resolvido');
+  assert.equal(db.cameras[0].data_resolucao, '2026-11-26');
+  assert.equal(db.cameras[0].observacoes, 'Baixa dada no Painel NOC');
+});
+
 test('bot NOC aceita a relação completa do painel sem limite de 1 MB', async t => {
   const { db, baseUrl } = await startServer(t);
   const nomeLongo = 'CÂMERA DE MONITORAMENTO '.repeat(40);

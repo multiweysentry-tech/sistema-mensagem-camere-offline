@@ -131,14 +131,40 @@
       <option value="">Online + Offline</option>
       <option value="Offline" selected>Somente Offline</option>
       <option value="Online">Somente Online</option>
+      <option value="Resolvido">Somente Resolvidos</option>
     </select>
     <button class="btn active" id="btnTabela">📋 Tabela</button>
     <button class="btn" id="btnMunicipios">🏙️ Municípios</button>
     <button class="btn" id="btnLeitura">🤖 Leitura de dados</button>
+    <button class="btn" id="btnDarBaixa">✔ Dar baixa nos selecionados</button>
+    <button class="btn" id="btnAgrupar">👥 Agrupar IDs em responsável</button>
     <button class="btn" id="btnEnviarOffline">➡️ Enviar offline ao painel</button>
     <button class="btn" id="btnExport">⬇️ Exportar CSV</button>
     <button class="btn" id="btnLimpar">✖ Limpar</button>
     <span class="count-info" id="countInfo"></span>
+  </div>
+
+  <div class="modal-back hidden" id="agruparModal">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>Agrupar câmeras em um responsável</h3>
+        <button class="btn" id="btnFecharAgrupar">Fechar</button>
+      </div>
+      <p class="sub" style="margin:0 0 12px">Selecione um responsável já cadastrado ou informe um novo nome e WhatsApp. As IDs escolhidas na tabela viram um único grupo na aba Offline. Nenhuma mensagem é enviada automaticamente.</p>
+      <div class="filters" style="margin:0 0 12px;flex-wrap:wrap">
+        <label>Responsável existente</label>
+        <select id="agruparResponsavel" style="max-width:320px"></select>
+        <label>Ou novo responsável</label>
+        <input id="agruparNome" placeholder="Nome ou empresa" style="max-width:220px">
+        <input id="agruparTelefone" placeholder="55 65 99999-0000" inputmode="numeric" style="max-width:220px">
+      </div>
+      <label>IDs de câmera (separadas por ; , espaço ou quebra de linha)</label>
+      <textarea id="agruparIds" rows="4" style="width:100%;box-sizing:border-box"></textarea>
+      <div id="agruparStatus" class="sub" style="margin:10px 0"></div>
+      <div class="act" style="margin-top:10px">
+        <button class="btn active" id="btnAgruparEnviar">Agrupar e enviar ao Offline</button>
+      </div>
+    </div>
   </div>
 
   <div class="modal-back hidden" id="leituraModal">
@@ -178,6 +204,7 @@
   <footer id="rodape"></footer>
 </div>
 
+<script src="/phone-utils.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 const PAYLOAD = /*__DATA__*/null;
@@ -187,6 +214,10 @@ let resumoMunicipios = PAYLOAD.resumoMunicipios;
 // Última leitura pronta para persistir. Preenchido após processar o anexo ou
 // quando o aplicativo principal restaura um arquivo salvo no armazenamento.
 let leituraAtual = null;
+// IDs já cadastradas no aplicativo. Preenchido pelo painel principal e, no
+// painel standalone, consultado via /api/cameras ao anexar um documento.
+let idsCadastradas = new Set();
+let responsaveisCadastrados = [];
 
 /* ---------- Severidade ---------- */
 const SEVS = [
@@ -197,7 +228,7 @@ const SEVS = [
   { key:'s4', label:'Crítico (> 7d)',   color:'#a855f7', test:()=>true },
 ];
 function sevDe(d){
-  if(d.status==='Online') return null;
+  if(!pendente(d)) return null;
   return SEVS.find(s=>s.test(d.offlineMin));
 }
 function slaClass(v){ return v>=90?'g':v>=60?'y':v>=30?'o':'r'; }
@@ -208,21 +239,33 @@ function fmtMin(m){
 }
 const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const norm = s => String(s??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/\s+/g,' ').trim();
+// Resolvido não é pendência: não entra em contagens, severidade nem envio ao Offline.
+const pendente = d => Boolean(d) && d.status!=='Online' && d.status!=='Resolvido';
+const chaveId = v => norm(String(v??'').replace(/^NOC-/i,'')).replace(/[^A-Z0-9]/g,'');
+// Telefone usa somente a regra central carregada de /phone-utils.js.
+function chaveTelefone(v){
+  const pu = (typeof window!=='undefined' && window.PhoneUtils)
+    || (typeof globalThis!=='undefined' && globalThis.PhoneUtils) || null;
+  const normalizada = pu && typeof pu.chaveComparacaoTelefone==='function'
+    ? pu.chaveComparacaoTelefone(v) : '';
+  return normalizada || String(v??'').trim();
+}
 const __nocRoot = window.__nocRoot || document;
 const $ = id => __nocRoot.getElementById(id);
 
 function calcularStats(arr, meta={}){
   const total=arr.length;
-  const offline=arr.filter(d=>d.status!=='Online').length;
-  const online=total-offline;
+  const resolvidos=arr.filter(d=>d.status==='Resolvido').length;
+  const offline=arr.filter(pendente).length;
+  const online=arr.filter(d=>d.status==='Online').length;
   const municipios=[...new Set(arr.map(d=>d.municipio).filter(Boolean))];
-  const municipiosAfetados=[...new Set(arr.filter(d=>d.status!=='Online').map(d=>d.municipio).filter(Boolean))].length;
-  const mais24h=arr.filter(d=>d.status!=='Online' && d.offlineMin>=1440).length;
-  const mais7d=arr.filter(d=>d.status!=='Online' && d.offlineMin>=10080).length;
+  const municipiosAfetados=[...new Set(arr.filter(pendente).map(d=>d.municipio).filter(Boolean))].length;
+  const mais24h=arr.filter(d=>pendente(d) && d.offlineMin>=1440).length;
+  const mais7d=arr.filter(d=>pendente(d) && d.offlineMin>=10080).length;
   const desc24Total=arr.reduce((a,d)=>a+(Number(d.desc24)||0),0);
   const slaMedio=total?Math.round(arr.reduce((a,d)=>a+(Number(d.slaTotal)||0),0)/total):0;
   return {
-    total, offline, online,
+    total, offline, online, resolvidos,
     municipios: municipios.length,
     municipiosAfetados,
     mais24h, mais7d, desc24Total, slaMedio,
@@ -236,7 +279,7 @@ function calcularResumoMunicipios(arr){
     const k=d.municipio||'SEM MUNICÍPIO';
     const m=agg[k]||(agg[k]={municipio:k,total:0,offline:0,online:0,desc24:0,sla:0,max:0});
     m.total++; m.desc24+=Number(d.desc24)||0; m.sla+=Number(d.slaTotal)||0;
-    if(d.status!=='Online'){ m.offline++; m.max=Math.max(m.max, Number(d.offlineMin)||0); }
+    if(pendente(d)){ m.offline++; m.max=Math.max(m.max, Number(d.offlineMin)||0); }
     else m.online++;
   });
   return Object.values(agg).map(m=>({
@@ -254,6 +297,7 @@ function renderDashboard(){
     { v:stats.total,            l:'Câmeras no relatório',   c:'blue' },
     { v:stats.offline,          l:'Offline agora',          c:'red' },
     { v:stats.online,           l:'Online',                 c:'green' },
+    { v:stats.resolvidos||0,    l:'Resolvidas (baixa)',     c:'green' },
     { v:stats.municipiosAfetados+'/'+stats.municipios, l:'Municípios afetados', c:'orange' },
     { v:stats.mais24h,          l:'Offline há mais de 24h', c:'orange' },
     { v:stats.mais7d,           l:'Críticas (> 7 dias)',    c:'purple' },
@@ -309,6 +353,7 @@ renderDashboard();
 
 let sortKey='offlineMin', sortDir=-1;
 const COLS = [
+  {k:'_sel',      l:'', nosort:true},
   {k:'id',        l:'ID'},
   {k:'nome',      l:'Câmera / Local'},
   {k:'municipio', l:'Município'},
@@ -320,6 +365,7 @@ const COLS = [
   {k:'desc24',    l:'Desc. 24h'},
   {k:'sla24',     l:'SLA 24h'},
   {k:'slaTotal',  l:'SLA total'},
+  {k:'_ac',       l:'Ação', nosort:true},
 ];
 
 function filtrar(){
@@ -354,12 +400,18 @@ function renderTabela(){
   }).join('');
   $('tbody').innerHTML = rows.map(d=>{
     const s = sevDe(d);
-    const statusB = d.status==='Online' ? '<span class="badge b-on">● Online</span>' : '<span class="badge b-off">● Offline</span>';
-    const tempo = d.status==='Online' ? '<span class="muted">—</span>'
-      : `<span class="sev" style="background:${s.color}">${esc(d.offlineStr)}</span>`;
+    const id = esc(d.idTexto||d.id);
+    const statusB = d.status==='Online' ? '<span class="badge b-on">● Online</span>'
+      : d.status==='Resolvido' ? '<span class="badge b-on">✔ Resolvido</span>'
+      : '<span class="badge b-off">● Offline</span>';
+    const tempo = pendente(d) && s
+      ? `<span class="sev" style="background:${s.color}">${esc(d.offlineStr)}</span>`
+      : '<span class="muted">—</span>';
     const resp = d.responsaveis.length ? esc(d.responsaveis.join(' · ')) : '<span class="muted">— sem responsável —</span>';
     const tag = d.marcadores ? ` <span class="tag">${esc(d.marcadores)}</span>` : '';
+    const acao = pendente(d) ? `<button class="btn" data-baixa="${id}">Dar baixa</button>` : '<span class="muted">—</span>';
     return `<tr>
+      <td>${pendente(d)?`<input type="checkbox" class="noc-sel" value="${id}" aria-label="Selecionar ID ${id}">`:''}</td>
       <td class="num-cell muted">${esc(d.idTexto)}</td>
       <td class="nome">${esc(d.nome)}${tag}</td>
       <td>${esc(d.municipio)}</td>
@@ -371,8 +423,12 @@ function renderTabela(){
       <td class="num-cell ${d.desc24>=100?'sla r':d.desc24>=10?'sla o':''}">${d.desc24.toLocaleString('pt-BR')}</td>
       <td class="num-cell sla ${slaClass(d.sla24)}">${d.sla24}%</td>
       <td class="num-cell sla ${slaClass(d.slaTotal)}">${d.slaTotal}%</td>
+      <td>${acao}</td>
     </tr>`;
   }).join('');
+  $('tbody').querySelectorAll('[data-baixa]').forEach(btn=>{
+    btn.onclick=()=>darBaixa([btn.dataset.baixa]);
+  });
   $('countInfo').textContent = `${rows.length} de ${data.length} câmeras`;
   $('theadRow').querySelectorAll('th').forEach(th=>{
     if(th.dataset.nosort) return;
@@ -390,7 +446,7 @@ function renderMunicipios(){
   rows.forEach(d=>{
     const m=agg[d.municipio]||(agg[d.municipio]={total:0,off:0,desc:0,sla:0,max:0});
     m.total++; m.desc+=d.desc24; m.sla+=d.slaTotal;
-    if(d.status!=='Online'){m.off++;m.max=Math.max(m.max,d.offlineMin);}
+    if(pendente(d)){m.off++;m.max=Math.max(m.max,d.offlineMin);}
   });
   const list=Object.entries(agg).sort((a,b)=>b[1].off-a[1].off||a[0].localeCompare(b[0],'pt-BR'));
   $('munGrid').innerHTML = list.map(([nome,m])=>
@@ -421,11 +477,160 @@ function mostrar(view){
   tab ? renderTabela() : renderMunicipios();
 }
 
+/* ---------- Baixa, agrupamento e dedupe ---------- */
+function atualizarDepoisDeAcao(mensagem){
+  stats = calcularStats(data, { geradoEm: new Date().toLocaleString('pt-BR'), arquivoFonte: stats.arquivoFonte });
+  resumoMunicipios = calcularResumoMunicipios(data);
+  PAYLOAD.stats = stats; PAYLOAD.data = data; PAYLOAD.resumoMunicipios = resumoMunicipios;
+  renderDashboard();
+  mostrar($('viewTabela').classList.contains('hidden') ? 'municipios' : 'tabela');
+  prepararLeituraParaSalvar(stats.arquivoFonte);
+  if(mensagem && $('leituraStatus')) $('leituraStatus').textContent = mensagem;
+}
+function darBaixa(ids, observacao){
+  const alvo = new Set((Array.isArray(ids)?ids:[ids]).map(chaveId).filter(Boolean));
+  if(!alvo.size) return 0;
+  const agora = new Date();
+  const dataResolucao = agora.toISOString().slice(0,10);
+  const obs = String(observacao||'').trim() || `Baixa dada no Painel NOC em ${agora.toLocaleString('pt-BR')}`;
+  const afetadas = [];
+  for(const d of data){
+    if(!alvo.has(chaveId(d.idTexto||d.id))) continue;
+    d.status = 'Resolvido';
+    d.dataResolucao = dataResolucao;
+    d.observacao = [d.observacao, obs].filter(Boolean).join(' | ').slice(0, MAX_CAMPO_CSV);
+    d.offlineMin = 0; d.offlineStr = '';
+    afetadas.push(d.idTexto||d.id);
+  }
+  if(!afetadas.length) return 0;
+  atualizarDepoisDeAcao(`${afetadas.length} câmera(s) baixada(s) como Resolvido. Salve a leitura para persistir ou aguarde a sincronização com o aplicativo.`);
+  window.dispatchEvent(new CustomEvent('noc:baixa',{detail:{ids:afetadas,dataResolucao,observacao:obs}}));
+  return afetadas.length;
+}
+function idsSelecionadas(){
+  return [...($('tbody')?.querySelectorAll('input.noc-sel:checked')||[])].map(el=>el.value);
+}
+function popularResponsaveisAgrupamento(){
+  const sel = $('agruparResponsavel');
+  if(!sel) return;
+  const mapa = new Map();
+  const add = (nome, telefone) => {
+    const n = String(nome||'').trim();
+    if(!n || n.toUpperCase()==='SEM RESPONSÁVEL INFORMADO') return;
+    const k = norm(n) + '::' + chaveTelefone(telefone);
+    if(!mapa.has(k)) mapa.set(k, {nome:n, telefone:String(telefone||'')});
+  };
+  for(const r of responsaveisCadastrados) add(r.nome, r.telefone);
+  for(const d of data) for(const nome of (Array.isArray(d.responsaveis)?d.responsaveis:[])) add(nome, d.telefone||'');
+  const atual = sel.value;
+  sel.innerHTML = '<option value="">— selecionar responsável existente —</option>' + [...mapa.values()]
+    .sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'))
+    .map((r,i)=>`<option value="${i}" data-nome="${esc(r.nome)}" data-telefone="${esc(r.telefone)}">${esc(r.nome)}${r.telefone?` · ${esc(r.telefone)}`:''}</option>`)
+    .join('');
+  if(atual && sel.querySelector(`option[value="${CSS.escape(atual)}"]`)) sel.value = atual;
+}
+function abrirAgrupar(){
+  popularResponsaveisAgrupamento();
+  const ids = idsSelecionadas();
+  const campo = $('agruparIds');
+  if(campo) campo.value = ids.join('; ');
+  const status = $('agruparStatus');
+  if(status) status.textContent = ids.length
+    ? `${ids.length} ID(s) selecionada(s) na tabela. Você pode acrescentar ou remover IDs antes de enviar.`
+    : 'Nenhuma ID selecionada na tabela. Digite as IDs abaixo.';
+  $('agruparModal')?.classList.remove('hidden');
+}
+function fecharAgrupar(){ $('agruparModal')?.classList.add('hidden'); }
+function itensOffline(){
+  return (Array.isArray(data)?data:[]).filter(pendente).map(d=>({
+    id:d.idTexto||d.id,
+    nome:d.nome,
+    municipio:d.municipio,
+    responsaveis:Array.isArray(d.responsaveis)?d.responsaveis.join(' | '):(d.responsaveis||''),
+    marcadores:Array.isArray(d.marcadores)?d.marcadores.join(' | '):(d.marcadores||''),
+    status:d.status,
+    ultimo:d.ultimo,
+    tempo:d.offlineStr||'',
+    desc24:d.desc24,
+    sla24:d.sla24,
+    slaTotal:d.slaTotal
+  }));
+}
+function agruparIdsEmResponsavel(){
+  const bruto = $('agruparIds')?.value||'';
+  const ids = [...new Set(bruto.split(/[\s,;]+/).map(x=>x.trim()).filter(Boolean))];
+  if(!ids.length){ $('agruparStatus').textContent='Informe ao menos uma ID de câmera.'; return; }
+  const selecionado = $('agruparResponsavel')?.selectedOptions?.[0];
+  const nomeExistente = selecionado?.dataset?.nome || '';
+  const telExistente = selecionado?.dataset?.telefone || '';
+  const nome = String($('agruparNome')?.value||'').trim() || nomeExistente;
+  const telefone = String($('agruparTelefone')?.value||'').trim() || telExistente;
+  if(!nome){ $('agruparStatus').textContent='Escolha um responsável existente ou digite um novo nome.'; return; }
+  const alvo = new Set(ids.map(chaveId));
+  let vinculadas = 0;
+  for(const d of data){
+    if(!alvo.has(chaveId(d.idTexto||d.id))) continue;
+    d.responsaveis = [nome];
+    d.telefone = telefone;
+    vinculadas++;
+  }
+  if(!vinculadas){ $('agruparStatus').textContent='Nenhuma ID informada foi encontrada no painel.'; return; }
+  atualizarDepoisDeAcao(`${vinculadas} ID(s) agrupada(s) em ${nome} e enviada(s) ao Offline. Nenhuma mensagem foi enviada automaticamente.`);
+  window.dispatchEvent(new CustomEvent('noc:offline',{detail:{
+    items:itensOffline(),
+    groups:[{responsavel_nome:nome, responsavel_telefone:telefone, cameraIds:ids}]
+  }}));
+  fecharAgrupar();
+}
+async function carregarIdsCadastradas(){
+  if(Array.isArray(window.__nocIdsCadastradas)) return;
+  try{
+    const resp = await fetch('/api/cameras',{credentials:'same-origin'});
+    if(!resp.ok) return;
+    const lista = await resp.json();
+    if(!Array.isArray(lista)) return;
+    idsCadastradas = new Set(lista.map(c=>chaveId(c.id)).filter(Boolean));
+    const porNome = new Map();
+    for(const c of lista){
+      const nome = String(c.responsavel_nome||'').trim();
+      const tel = String(c.responsavel_telefone||'').trim();
+      if(!nome || !tel || nome.toUpperCase()==='SEM RESPONSÁVEL INFORMADO') continue;
+      const k = norm(nome)+'::'+chaveTelefone(tel);
+      if(!porNome.has(k)) porNome.set(k,{nome,telefone:tel});
+    }
+    responsaveisCadastrados = [...porNome.values()];
+    window.__nocIdsCadastradas = lista.map(c=>c.id);
+  }catch(e){ /* painel standalone sem API: segue sem dedupe remoto */ }
+}
+if(window.__nocIdsHandler) window.removeEventListener('noc:ids', window.__nocIdsHandler);
+window.__nocIdsHandler = e=>{
+  const detail = e.detail||{};
+  idsCadastradas = new Set((Array.isArray(detail.ids)?detail.ids:[]).map(chaveId).filter(Boolean));
+  responsaveisCadastrados = Array.isArray(detail.responsaveis)?detail.responsaveis:[];
+  window.__nocIdsCadastradas = Array.isArray(detail.ids)?detail.ids:[];
+};
+window.addEventListener('noc:ids', window.__nocIdsHandler);
+
+// IDs já cadastradas no aplicativo e IDs repetidas no arquivo são ignoradas:
+// o cadastro atual prevalece e a contagem aparece no resumo da leitura.
+function filtrarLinhasLidas(lidas){
+  const vistas = new Set();
+  const parsed = [];
+  let ignoradasCadastradas = 0, duplicadasNoArquivo = 0;
+  for(const n of (Array.isArray(lidas)?lidas:[])){
+    const k = chaveId(n.idTexto||n.id);
+    if(idsCadastradas.has(k)){ ignoradasCadastradas++; continue; }
+    if(vistas.has(k)){ duplicadasNoArquivo++; continue; }
+    vistas.add(k); parsed.push(n);
+  }
+  return { parsed, ignoradasCadastradas, duplicadasNoArquivo };
+}
+
 /* ---------- Export CSV ---------- */
 function exportar(){
   const rows=filtrar();
-  const head='ID;Nome;Município;Categoria;Responsáveis;Marcadores;Status;Último status;Tempo offline;Desconexões 24h;SLA 24h;SLA total';
-  const lines=rows.map(d=>[d.id,d.nome,d.municipio,d.categoria,d.responsaveis.join(' | '),d.marcadores,d.status,d.ultimo,d.offlineStr,d.desc24,d.sla24+'%',d.slaTotal+'%']
+  const head='ID;Nome;Município;Categoria;Responsáveis;Marcadores;Status;Data resolução;Observação;Último status;Tempo offline;Desconexões 24h;SLA 24h;SLA total';
+  const lines=rows.map(d=>[d.id,d.nome,d.municipio,d.categoria,d.responsaveis.join(' | '),d.marcadores,d.status,d.dataResolucao||'',d.observacao||'',d.ultimo,d.offlineStr,d.desc24,d.sla24+'%',d.slaTotal+'%']
     .map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(';'));
   const blob=new Blob(['﻿'+[head,...lines].join('\r\n')],{type:'text/csv;charset=utf-8'});
   const a=document.createElement('a');
@@ -439,25 +644,28 @@ function exportar(){
 });
 $('btnTabela').onclick=()=>mostrar('tabela');
 $('btnMunicipios').onclick=()=>mostrar('municipios');
+$('btnDarBaixa').onclick=()=>{
+  const ids=idsSelecionadas();
+  if(!ids.length && $('leituraStatus')) $('leituraStatus').textContent='Selecione ao menos uma câmera pendente na tabela ou use o botão “Dar baixa” de uma linha.';
+  else darBaixa(ids);
+};
+$('btnAgrupar').onclick=abrirAgrupar;
+$('btnFecharAgrupar').onclick=fecharAgrupar;
+$('agruparModal').addEventListener('click',e=>{ if(e.target.id==='agruparModal') fecharAgrupar(); });
+$('agruparResponsavel').addEventListener('change',e=>{
+  const op=e.target.selectedOptions?.[0];
+  if(!op) return;
+  if(op.dataset.nome && !$('agruparNome').value) $('agruparNome').value=op.dataset.nome;
+  if(op.dataset.telefone && !$('agruparTelefone').value) $('agruparTelefone').value=op.dataset.telefone;
+});
+$('btnAgruparEnviar').onclick=agruparIdsEmResponsavel;
 
 /* ---------- Leitura de dados (Bot) ---------- */
 function abrirLeitura(){ $('leituraModal').classList.remove('hidden'); }
 function fecharLeitura(){ $('leituraModal').classList.add('hidden'); }
 $('btnLeitura').onclick=abrirLeitura;
 function enviarOfflineParaApp(){
-  const linhas=(Array.isArray(data)?data:[]).filter(d=>d.status!=='Online').map(d=>({
-    id:d.idTexto||d.id,
-    nome:d.nome,
-    municipio:d.municipio,
-    responsaveis:Array.isArray(d.responsaveis)?d.responsaveis.join(' | '):(d.responsaveis||''),
-    marcadores:Array.isArray(d.marcadores)?d.marcadores.join(' | '):(d.marcadores||''),
-    status:d.status,
-    ultimo:d.ultimo,
-    tempo:d.offlineStr||'',
-    desc24:d.desc24,
-    sla24:d.sla24,
-    slaTotal:d.slaTotal
-  }));
+  const linhas=itensOffline();
   window.dispatchEvent(new CustomEvent('noc:offline',{detail:{items:linhas}}));
   const btn=$('btnEnviarOffline'), anterior=btn.textContent;
   btn.textContent=`✅ ${linhas.length} enviadas`;
@@ -501,6 +709,7 @@ function parsePct(v){
 function parseStatus(v){
   const s=norm(v);
   if(!s) return 'Offline';
+  if(s.includes('RESOLVID') || s.includes('BAIXAD') || s.includes('CONCLUÍD') || s.includes('CONCLUID')) return 'Resolvido';
   if(s.includes('ONLINE') && !s.includes('OFFLINE')) return 'Online';
   if(s.includes('OFFLINE')) return 'Offline';
   if(s.includes('ATIVO') || s.includes('UP')) return 'Online';
@@ -519,6 +728,8 @@ function linhaParaCamera(row, idx){
   const desc24 = Number(String(pick(row,['Desc. 24h','Desconexões 24h','Desconexoes 24h','Desc 24h','Desconexões'])).replace(/[^0-9-]/g,'')) || 0;
   const sla24 = parsePct(pick(row,['SLA 24h','SLA 24']));
   const slaTotal = parsePct(pick(row,['SLA total','SLA Total','SLA']));
+  const dataResolucao = pick(row,['Data resolução','Data resolucao','Data da resolução','Data da resolucao']);
+  const observacao = pick(row,['Observação','Observacao','Observações','Observacoes']);
   const dt = parseDataBr(ultimoRaw);
   const ultimoTs = dt ? dt.getTime() : 0;
   const ultimo = dt ? dt.toLocaleString('pt-BR') : (ultimoRaw||'');
@@ -533,8 +744,8 @@ function linhaParaCamera(row, idx){
     nome: nome || ('CÂMERA ' + id),
     municipio: municipio || 'SEM MUNICÍPIO',
     responsaveis, marcadores,
-    categoria, status, ultimo, ultimoTs,
-    offlineMin, offlineStr: status==='Online' ? 'Online' : fmtMin(offlineMin),
+    categoria, status, ultimo, ultimoTs, dataResolucao, observacao,
+    offlineMin, offlineStr: pendente({status}) ? fmtMin(offlineMin) : (status==='Online'?'Online':''),
     desc24, sla24, slaTotal
   };
 }
@@ -583,6 +794,7 @@ async function processarLeitura(){
   if(btnSalvar)btnSalvar.disabled=true;
   $('leituraStatus').textContent='Lendo arquivo...';
   try{
+    await carregarIdsCadastradas();
     const buf = await file.arrayBuffer();
     let rows=[];
     const name=file.name.toLowerCase();
@@ -606,12 +818,13 @@ async function processarLeitura(){
     rows = rows.map(r => Object.fromEntries(Object.entries(r).map(([k,v]) => [k, limiteCampo(v)])));
     if(!rows.length){ $('leituraStatus').textContent='Arquivo vazio ou formato não reconhecido.'; return; }
 
-    const parsed = rows.map((r,i)=>linhaParaCamera(r,i)).filter(r=>r.nome || r.idTexto);
+    const lidas = rows.map((r,i)=>linhaParaCamera(r,i)).filter(r=>r.nome || r.idTexto);
+    const { parsed, ignoradasCadastradas, duplicadasNoArquivo } = filtrarLinhasLidas(lidas);
 
     // merge por idTexto/id/nome normalizado
     const byId = new Map(data.map(d=>[normKey(String(d.idTexto||d.id)), d]));
     const byNome = new Map(data.map(d=>[norm(d.nome), d]));
-    let atualizadas=0, novas=0, online=0, offline=0;
+    let atualizadas=0, novas=0, online=0, offline=0, resolvidas=0;
     for(const n of parsed){
       const kId=normKey(String(n.idTexto||n.id));
       const kNome=norm(n.nome);
@@ -622,7 +835,7 @@ async function processarLeitura(){
       } else {
         data.push(n); byId.set(kId,n); byNome.set(kNome,n); novas++;
       }
-      if(n.status==='Online') online++; else offline++;
+      if(n.status==='Online') online++; else if(n.status==='Resolvido') resolvidas++; else offline++;
     }
 
     stats = calcularStats(data, { geradoEm: new Date().toLocaleString('pt-BR'), arquivoFonte: file.name });
@@ -637,13 +850,16 @@ async function processarLeitura(){
       ['Câmeras processadas', parsed.length],
       ['Atualizadas', atualizadas],
       ['Novas', novas],
+      ['IDs já cadastradas (ignoradas)', ignoradasCadastradas],
+      ['IDs repetidas no arquivo (ignoradas)', duplicadasNoArquivo],
       ['Offline no arquivo', offline],
       ['Online no arquivo', online],
+      ['Resolvidas no arquivo', resolvidas],
       ['Total no painel', data.length]
     ];
     $('leituraResumo').innerHTML = resumo.map(([k,v])=>`<tr><td><b>${esc(k)}</b></td><td>${esc(String(v))}</td></tr>`).join('');
     prepararLeituraParaSalvar(file.name);
-    $('leituraStatus').textContent = 'Bot concluiu a leitura e atualizou o painel. Clique em "Salvar e atualizar" para persistir os dados.';
+    $('leituraStatus').textContent = `Bot concluiu a leitura. ${ignoradasCadastradas} ID(s) já cadastrada(s) e ${duplicadasNoArquivo} ID(s) repetida(s) foram ignoradas; o cadastro atual foi preservado. Clique em "Salvar e atualizar" para persistir.`;
   }catch(err){
     console.error(err);
     $('leituraStatus').textContent = 'Falha ao ler arquivo: ' + (err && err.message ? err.message : err);
@@ -653,7 +869,7 @@ async function processarLeitura(){
 /* ---------- Persistência da leitura ---------- */
 const COLUNAS_ARMAZENAMENTO = [
   'ID','Nome','Município','Categoria','Responsáveis','Marcadores','Status',
-  'Último status','Tempo offline','Desconexões 24h','SLA 24h','SLA total'
+  'Data resolução','Observação','Último status','Tempo offline','Desconexões 24h','SLA 24h','SLA total'
 ];
 function csvParaArmazenamento(){
   const citar = v => `"${String(v ?? '').replace(/"/g,'""')}"`;
@@ -665,8 +881,10 @@ function csvParaArmazenamento(){
     Array.isArray(d.responsaveis) ? d.responsaveis.join(' | ') : (d.responsaveis||''),
     Array.isArray(d.marcadores) ? d.marcadores.join(' | ') : (d.marcadores||''),
     d.status,
+    d.dataResolucao||'',
+    d.observacao||'',
     d.ultimo,
-    d.status==='Online' ? 'Online' : (d.offlineStr || fmtMin(d.offlineMin)),
+    pendente(d) ? (d.offlineStr || fmtMin(d.offlineMin)) : (d.status==='Online'?'Online':''),
     d.desc24,
     (Number(d.sla24)||0)+'%',
     (Number(d.slaTotal)||0)+'%'

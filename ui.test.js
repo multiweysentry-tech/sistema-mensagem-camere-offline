@@ -63,6 +63,26 @@ test('painel oferece bot NOC para transformar offline em rascunhos, sem envio au
   assert.match(html, /Nenhuma mensagem enviada/);
 });
 
+test('painel NOC integra baixa, agrupamento e dedupe com o aplicativo', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+
+  assert.match(html, /window\.addEventListener\("noc:baixa",async e=>/);
+  assert.match(html, /const fields=\{status:"Resolvido",data_resolucao:detail\.dataResolucao/);
+  assert.match(html, /observacoes:detail\.observacao\|\|"Baixa dada no Painel NOC"/);
+  assert.match(html, /apiRequest\("\/api\/cameras\/bulk",\{method:"PUT"/);
+  assert.match(html, /await loadFromApi\(\)/);
+
+  assert.match(html, /nocPainelGrupos=Array\.isArray\(e\.detail\?\.groups\)\?e\.detail\.groups:\[\]/);
+  assert.match(html, /if\(nocPainelGrupos\.length\)\{/);
+  assert.match(html, /groups:nocPainelGrupos/);
+  assert.match(html, /runNocBot\(\);/);
+  assert.match(html, /Nenhuma mensagem enviada/);
+
+  assert.match(html, /new CustomEvent\("noc:ids",\{detail:\{/);
+  assert.match(html, /ids:cams\.map\(c=>c\.id\)/);
+  assert.match(html, /responsaveis:\[\.\.\.new Map/);
+});
+
 test('prévia da mensagem não quebra antes de carregar as câmeras', () => {
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
   assert.match(html, /esc\(g\[r\]\?\.\[0\]\?\.nome\|\|r\)/);

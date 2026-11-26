@@ -306,3 +306,48 @@ test('regressões de segurança e consistência', async t => {
     assert.equal((await fetch(`${base}/%ZZ`)).status, 404);
   });
 });
+
+test('status Resolvido não é pendência e preserva data e observação da baixa', () => {
+  const csv = [
+    'ID;Nome;Município;Responsável;Marcadores;Status;Data resolução;Observação;Último status;Tempo offline;Desconexões 24h;SLA 24h;SLA total',
+    '"1";"CAM 1";"CUIABÁ";"João";"";"Resolvido";"26/11/2026";"Baixa concluída";"26/11/2026 10:00:00";"2 h";"0";"100%";"100%"',
+  ].join('\r\n');
+  const payload = noc.construirPayload(csv);
+
+  assert.equal(payload.stats.total, 1);
+  assert.equal(payload.stats.offline, 0);
+  assert.equal(payload.stats.online, 0);
+  assert.equal(payload.stats.resolvidos, 1);
+  assert.equal(noc.severidadeDe(payload.data[0]), null);
+  assert.equal(noc.filtrar(payload.data, { status: 'Resolvido' }).length, 1);
+  assert.equal(payload.data[0].dataResolucao, '26/11/2026');
+  assert.equal(payload.data[0].observacao, 'Baixa concluída');
+  assert.match(noc.csvOrganizado(payload), /Data resolução/);
+  assert.match(noc.csvOrganizado(payload), /Baixa concluída/);
+});
+
+test('painel standalone serve a mesma normalização central de telefone', async t => {
+  const pai = fs.mkdtempSync(path.join(os.tmpdir(), 'painel-noc-pai-'));
+  const raiz = path.join(pai, 'painel');
+  fs.mkdirSync(raiz);
+  fs.writeFileSync(
+    path.join(pai, 'phone-utils.js'),
+    fs.readFileSync(path.join(__dirname, '..', '..', 'phone-utils.js'))
+  );
+  fs.writeFileSync(path.join(raiz, 'painel-template.html'), MODELO);
+  fs.writeFileSync(path.join(raiz, 'noc-original.csv'), noc.BOM + CSV, 'utf8');
+  arquivos.gerarArquivos({ raiz, textoCsv: CSV });
+
+  const servidor = criarServidor({ raiz });
+  await new Promise(resolve => servidor.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${servidor.address().port}`;
+  t.after(() => {
+    servidor.close();
+    fs.rmSync(pai, { recursive: true, force: true });
+  });
+
+  const resposta = await fetch(`${base}/phone-utils.js`);
+  assert.equal(resposta.status, 200);
+  assert.match(resposta.headers.get('content-type'), /javascript/);
+  assert.match(await resposta.text(), /function normalizarTelefone/);
+});

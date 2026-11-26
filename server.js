@@ -983,6 +983,7 @@ function createApp(options = {}) {
         semTelefone: prepared.sync.semTelefone,
         drafts: prepared.drafts,
         offline: prepared.offline,
+        grupos: prepared.grupos || { grupos: 0, aplicadas: 0, ignoradas: 0, erros: [] },
         errors: prepared.errors,
         finishedAt: prepared.finishedAt,
         sync,
@@ -996,7 +997,7 @@ function createApp(options = {}) {
         camera_nome: prepared.sourceFile || 'NOC',
         responsavel_telefone: '',
         acao: 'BOT_NOC',
-        detalhe: `Rascunhos preparados: ${result.created} criadas, ${result.updated} atualizadas, ${prepared.drafts} aguardando responsável/telefone. Nenhuma mensagem enviada.`,
+        detalhe: `Rascunhos preparados: ${result.created} criadas, ${result.updated} atualizadas, ${prepared.drafts} aguardando responsável/telefone, ${result.grupos.aplicadas} ID(s) agrupada(s). Nenhuma mensagem enviada.`,
         status_anterior: '',
         status_novo: '',
         trace_id: null

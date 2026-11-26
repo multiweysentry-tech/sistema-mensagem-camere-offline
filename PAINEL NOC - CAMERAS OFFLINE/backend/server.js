@@ -141,6 +141,21 @@ function criarServidor(opcoes = {}) {
       if (rota.startsWith('/api/')) return await rotaAPI(req, res, url, { raiz, limiteBytes });
       if (req.method !== 'GET' && req.method !== 'HEAD') return erro(res, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido');
 
+      // O painel standalone usa a mesma regra de telefone do aplicativo.
+      if (rota === '/phone-utils.js') {
+        const origem = path.resolve(raiz, '..', 'phone-utils.js');
+        if (!fs.existsSync(origem) || !fs.statSync(origem).isFile()) {
+          return responderTexto(res, 404, 'Não encontrado', 'text/plain; charset=utf-8');
+        }
+        const conteudo = fs.readFileSync(origem);
+        res.writeHead(200, {
+          'Content-Type': TIPOS['.js'],
+          'Content-Length': conteudo.length,
+          'Cache-Control': 'no-store',
+        });
+        return res.end(req.method === 'HEAD' ? undefined : conteudo);
+      }
+
       const alvo = caminhoEstatico(raiz, rota);
       if (!alvo || !fs.existsSync(alvo) || !fs.statSync(alvo).isFile()) {
         return responderTexto(res, 404, 'Não encontrado', 'text/plain; charset=utf-8');
