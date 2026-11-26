@@ -172,11 +172,9 @@ try {
   };
 
   // O webhook da Datafy/Meta precisa processar as respostas dos botoes.
-  // Mantemos os agendamentos desativados no Vercel, mas ligamos somente o
-  // tratamento de mensagens recebidas.
-  const { createBots } = require('../bots');
-  const incomingBots = createBots({ db, wa, resolveWa: () => wa });
-  bots.onIncomingMessage = incomingBots.onIncomingMessage;
+  // Usamos um modulo sem Baileys: importar bots.js no Vercel quebra o runtime.
+  const { createIncomingReplyHandler } = require('../lib/incoming-reply');
+  bots.onIncomingMessage = createIncomingReplyHandler({ db, wa });
 } catch (error) {
   // Captura falhas de importacao para nao virar um FUNCTION_INVOCATION_FAILED opaco.
   loadError = error;

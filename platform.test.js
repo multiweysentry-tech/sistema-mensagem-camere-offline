@@ -258,8 +258,9 @@ test('schema legado do log recebe a coluna trace_id na inicialização', () => {
 
 test('Vercel processa respostas do WhatsApp sem ligar agendamentos', () => {
   const source = fs.readFileSync(path.join(__dirname, 'api', 'index.js'), 'utf8');
-  assert.match(source, /createBots\(\{ db, wa, resolveWa: \(\) => wa \}\)/);
-  assert.match(source, /bots\.onIncomingMessage\s*=\s*incomingBots\.onIncomingMessage/);
+  assert.match(source, /createIncomingReplyHandler\(\{ db, wa \}\)/);
+  assert.match(source, /bots\.onIncomingMessage\s*=\s*createIncomingReplyHandler/);
+  assert.doesNotMatch(source, /require\('\.\.\/bots'\)/);
   assert.match(source, /startSchedulers:\s*async \(\) => \{\}/);
 });
 
